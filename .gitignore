@@ -1,2 +1,11 @@
 data/
 .claude/
+__pycache__/
+logs/
+.env
+AGENTS.md
+SPEC.md
+PROGRESS.md
+outputs/
+wandb/
+checkpoints/

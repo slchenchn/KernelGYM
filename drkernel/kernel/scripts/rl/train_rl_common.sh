@@ -201,6 +201,7 @@ REWARD_TASK_TIMEOUT=${REWARD_TASK_TIMEOUT:-600}
 REWARD_TASK_TIMEOUT_CLIENT=${REWARD_TASK_TIMEOUT_CLIENT:-2400}
 REWARD_PRINT_STATUS=${REWARD_PRINT_STATUS:-True}
 NUM_PERF_TRIALS=${NUM_PERF_TRIALS:-100}
+REFERENCE_BACKEND=${REFERENCE_BACKEND:-"torch_compile"}
 
 # Optional dump directories
 ROLLOUT_DATA_DIR=${ROLLOUT_DATA_DIR:-""}
@@ -588,8 +589,21 @@ setup_training_environment() {
     done
   fi
 
+  is_zero() {
+    python - "$1" <<'PY'
+import sys
+
+raw = sys.argv[1]
+try:
+    value = float(raw)
+except Exception:
+    sys.exit(1)
+sys.exit(0 if abs(value) < 1e-12 else 1)
+PY
+  }
+
   # for KL_LOSS_COEF
-  if (( $(echo "$KL_LOSS_COEF == 0" | bc -l) )); then
+  if is_zero "$KL_LOSS_COEF"; then
     USE_KL_LOSS=False
   else
     USE_KL_LOSS=True
@@ -597,7 +611,7 @@ setup_training_environment() {
   echo "Use KL Loss: $USE_KL_LOSS"
 
   # for KL_COEF
-  if (( $(echo "$KL_COEF == 0" | bc -l) )); then
+  if is_zero "$KL_COEF"; then
     USE_KL_COEF=False
   else
     USE_KL_COEF=True
@@ -778,6 +792,7 @@ run_training() {
       reward_model.num_perf_trials=$NUM_PERF_TRIALS \
       reward_model.print_status=$REWARD_PRINT_STATUS \
       reward_model.reward_func_name=$REWARD_FUNC_NAME \
+      reward_model.reference_backend=$REFERENCE_BACKEND \
       reward_model.speedup_reward_upper_bound=$SPEEDUP_REWARD_UPPER_BOUND \
       reward_model.speedup_reward_lower_bound=$SPEEDUP_REWARD_LOWER_BOUND \
       reward_model.coverage_reward.reward_type=$COVERAGE_REWARD_TYPE \

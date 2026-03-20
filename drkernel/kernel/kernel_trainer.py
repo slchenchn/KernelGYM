@@ -2383,15 +2383,32 @@ class RayKernelTrainer(RayPPOTrainer):
 
                 # convert list of dict to dict of list (only for valid entries with kernel metrics)
                 if len(valid_reward_extra_info_list) > 0:
-                    raw_reward_extra_info_dict = {
-                        k: [d[k] for d in valid_reward_extra_info_list]
-                        for k in valid_reward_extra_info_list[0].keys()
-                    }
+                    all_keys = set()
+                    for d in valid_reward_extra_info_list:
+                        if len(d) > 0:
+                            all_keys.update(d.keys())
+
+                    raw_reward_extra_info_dict = {}
+                    for k in all_keys:
+                        values = []
+                        value_sources = []
+                        for d, data_source in zip(
+                            valid_reward_extra_info_list, valid_data_sources
+                        ):
+                            if k not in d:
+                                continue
+                            values.append(d[k])
+                            value_sources.append(data_source)
+
+                        if values:
+                            raw_reward_extra_info_dict[k] = (values, value_sources)
 
                     if reward_extra_info_dict is None:
                         reward_extra_info_dict = {}
-                    for key, extra_reward in raw_reward_extra_info_dict.items():
-                        for i, data_source in enumerate(valid_data_sources):
+                    for key, (extra_reward, extra_reward_sources) in (
+                        raw_reward_extra_info_dict.items()
+                    ):
+                        for i, data_source in enumerate(extra_reward_sources):
                             composed_key = f"{key}_{data_source}"
                             if composed_key not in reward_extra_info_dict:
                                 reward_extra_info_dict[composed_key] = []

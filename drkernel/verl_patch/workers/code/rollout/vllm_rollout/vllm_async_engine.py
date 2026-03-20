@@ -1649,7 +1649,7 @@ class MultiTurnAsyncvLLMEngine:
         Based on token generation rates, compute an adaptive timeout for LLM generation.
         """
         history = self.token_rate_history_val if is_validate else self.token_rate_history_train
-        if len(history) <= 1000:
+        if len(history) < 1000:
             # If no history, use default timeout
             return None
 

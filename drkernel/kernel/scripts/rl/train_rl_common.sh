@@ -167,6 +167,7 @@ ACTOR_PARAMETER_OFFLOAD=${ACTOR_PARAMETER_OFFLOAD:-False}
 MODEL_NAME=${MODEL_NAME:-Qwen3-8B-Base}
 SAVE_FREQ=${SAVE_FREQ:-10}
 TEST_FREQ=${TEST_FREQ:-10}
+TRAINER_LOGGERS=${TRAINER_LOGGERS:-"['console','wandb']"}
 REMOVE_CLIP=${REMOVE_CLIP:-False}
 ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE=${ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE:-1}
 FREE_CACHE_ENGINE=${FREE_CACHE_ENGINE:-True}
@@ -815,7 +816,7 @@ run_training() {
       algorithm.gamma=$GAMMA \
       critic.ppo_micro_batch_size_per_gpu=4 \
       trainer.critic_warmup=0 \
-      trainer.logger=['console','wandb'] \
+      trainer.logger=$TRAINER_LOGGERS \
       trainer.rejection_sample=$REJECTION_SAMPLE \
       trainer.project_name=$PROJECT_NAME \
       trainer.experiment_name=$RUN_NAME \

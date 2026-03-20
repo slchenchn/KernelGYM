@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -87,6 +88,9 @@ def _truncate_text(text: Any, limit: int = 400) -> Any:
     return text[:limit] + "...<truncated>"
 
 
+CODE_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<code>.*?)```", re.DOTALL)
+
+
 def append_jsonl_event(event_type: str, payload: Dict[str, Any]) -> None:
     path = _event_log_path(event_type)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,6 +103,20 @@ def append_jsonl_event(event_type: str, payload: Dict[str, Any]) -> None:
     record.update(payload)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(_to_jsonable(record), ensure_ascii=False) + "\n")
+
+
+def extract_code_blocks(text: str | None) -> list[dict[str, str]]:
+    if not text:
+        return []
+    blocks: list[dict[str, str]] = []
+    for match in CODE_BLOCK_RE.finditer(text):
+        blocks.append(
+            {
+                "language": match.group("lang").strip(),
+                "code": match.group("code").strip(),
+            }
+        )
+    return blocks
 
 
 def _extract_scalar(mapping: Dict[str, Any], key: str) -> Any:
@@ -240,3 +258,66 @@ def build_turn_token_record(
         "is_validate": bool(is_validate),
         "global_step": int(global_step),
     }
+
+
+def build_generated_code_record(
+    *,
+    request_id: str,
+    turn_index: int,
+    model_response: str,
+    tool_response: str | None,
+    prefill_tokens: int,
+    decode_tokens: int,
+    model_time_s: float,
+    env_time_s: float,
+    is_validate: bool,
+    global_step: int,
+    sample_uuid: str | None = None,
+    entry_point: str | None = None,
+) -> Dict[str, Any]:
+    code_blocks = extract_code_blocks(model_response)
+    return {
+        "request_id": request_id,
+        "sample_uuid": sample_uuid,
+        "entry_point": entry_point,
+        "turn_index": int(turn_index),
+        "prefill_tokens": int(prefill_tokens),
+        "decode_tokens": int(decode_tokens),
+        "model_time_s": float(model_time_s),
+        "env_time_s": float(env_time_s),
+        "is_validate": bool(is_validate),
+        "global_step": int(global_step),
+        "model_response": model_response,
+        "tool_response": tool_response,
+        "code_block_count": len(code_blocks),
+        "code_blocks": code_blocks,
+    }
+
+
+def format_turn_model_summary(
+    *,
+    turn_index: int,
+    model_time_s: float,
+    prefill_tokens: int,
+    decode_tokens: int,
+    model_response: str,
+) -> str:
+    code_blocks = extract_code_blocks(model_response)
+    return (
+        f"Turn {turn_index} | Model time: {model_time_s:.2f}s | "
+        "Model Response: "
+        f"chars={len(model_response)} prefill_tokens={prefill_tokens} "
+        f"decode_tokens={decode_tokens} code_blocks={len(code_blocks)}"
+    )
+
+
+def format_turn_env_summary(
+    *,
+    turn_index: int,
+    env_time_s: float,
+    tool_response: str,
+) -> str:
+    return (
+        f"Turn {turn_index} | Env time: {env_time_s:.2f}s | "
+        f"Tool Response: chars={len(tool_response)}"
+    )

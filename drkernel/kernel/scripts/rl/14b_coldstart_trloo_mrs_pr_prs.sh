@@ -1,5 +1,25 @@
 #!/bin/bash
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DRKERNEL_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+PROJECT_NAME="${PROJECT_NAME:-drkernel}"
+RUN_LOG_TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+LOG_RUN_PREFIX="${LOG_RUN_PREFIX:-trloo-14b}"
+TRAIN_LOG_HW="${TRAIN_LOG_HW:-8XA800}"
+REWARD_LOG_HW="${REWARD_LOG_HW:-16x4090}"
+RUN_LOG_PHASE="${RUN_LOG_PHASE:-run}"
+RUN_LOG_BASENAME="${RUN_LOG_BASENAME:-${LOG_RUN_PREFIX}.train.${TRAIN_LOG_HW}.reward.${REWARD_LOG_HW}.${RUN_LOG_PHASE}.${RUN_LOG_TIMESTAMP}}"
+RUN_LOG_DIR="${RUN_LOG_DIR:-${DRKERNEL_ROOT}/logs/${RUN_LOG_BASENAME}}"
+MAIN_LOG="${MAIN_LOG:-${RUN_LOG_DIR}/main.log}"
+
+if [ "${DRKERNEL_LOGGING_INITIALIZED:-0}" != "1" ]; then
+    mkdir -p "${RUN_LOG_DIR}/structured"
+    export DRKERNEL_LOGGING_INITIALIZED=1
+    export DRKERNEL_EVENT_LOG_DIR="${RUN_LOG_DIR}/structured"
+    echo "Logging training run to: ${MAIN_LOG}"
+    exec > >(tee -a "${MAIN_LOG}") 2>&1
+fi
+
 TRAIN_DATASET=("/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM/drkernel/data/drkernel-rl-data/cuda_llm_rl_thinking_1025.parquet")
 VALID_DATASET=("/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM/drkernel/data/drkernel-validation-data/validation_data_thinking.parquet")
 KERNELGYM_SERVER_URL="${KERNELGYM_SERVER_URL:-""}"
@@ -93,6 +113,6 @@ SAMPLE_OVERSAMPLING_FACTOR=1.0
 SAMPLE_SELECTION_STRATEGY=efficiency_stochastic
 MAX_SKIP_STEPS=5
 
-source "$(dirname "$0")/train_rl_common.sh"
+source "${SCRIPT_DIR}/train_rl_common.sh"
 
 main "$@"

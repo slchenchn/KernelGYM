@@ -2,11 +2,14 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PWD=/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM/drkernel
-LOG_DIR="${PWD}/logs/init_val"
-PROBE_LOG="${PROBE_LOG:-${LOG_DIR}/$(date +%Y%m%d-%H%M%S).log}"
+PROJECT_NAME="${PROJECT_NAME:-drkernel}"
+RUN_LOG_TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+RUN_LOG_DIR="${RUN_LOG_DIR:-${PWD}/logs/init_val/${PROJECT_NAME}-${RUN_LOG_TIMESTAMP}}"
+PROBE_LOG="${PROBE_LOG:-${RUN_LOG_DIR}/main.log}"
 
 cd "${PWD}"
-mkdir -p "${LOG_DIR}"
+mkdir -p "${RUN_LOG_DIR}/structured"
+export DRKERNEL_EVENT_LOG_DIR="${RUN_LOG_DIR}/structured"
 
 echo "Logging initial val probe to: ${PROBE_LOG}"
 exec > >(tee -a "${PROBE_LOG}") 2>&1

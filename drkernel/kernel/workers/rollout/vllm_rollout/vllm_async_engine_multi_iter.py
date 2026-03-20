@@ -52,9 +52,12 @@ from vllm.worker.worker_base import WorkerWrapperBase
 
 from kernel.event_logging import (
     append_jsonl_event,
-    build_turn_token_record,
     build_env_result_record,
+    build_generated_code_record,
+    build_turn_token_record,
+    format_turn_env_summary,
     format_env_result_summary,
+    format_turn_model_summary,
 )
 from kernel.workers.agent import BaseAgent, KernelAgent
 from verl_patch.workers.code.agent_env import (
@@ -1185,6 +1188,24 @@ class MultiIterAsyncvLLMEngine:
 
         return per_turn_prompts
 
+    def _stdout_filtered_logging_messages(self, logging_messages: list[str]) -> list[str]:
+        prompt_templates = {
+            prompt_config["template"].strip()
+            for prompt_config in (self.per_turn_prompts or {}).values()
+            if prompt_config.get("template")
+        }
+
+        filtered_messages = []
+        for msg in logging_messages:
+            stripped = msg.strip()
+            if stripped.startswith("Prompt Template:"):
+                continue
+            if stripped in prompt_templates:
+                continue
+            filtered_messages.append(msg)
+
+        return filtered_messages
+
     def log_multiturn_messages(
         self,
         step: int,
@@ -1208,7 +1229,9 @@ class MultiIterAsyncvLLMEngine:
             finish_reason: How the conversation ended
         """
         if not self.logfire_logger:
-            print("\n\n".join(logging_messages))
+            filtered_messages = self._stdout_filtered_logging_messages(logging_messages)
+            if filtered_messages:
+                print("\n\n".join(filtered_messages))
             return
 
         # Parse timing information from messages
@@ -1739,8 +1762,6 @@ class MultiIterAsyncvLLMEngine:
                 response_truncation = current_prompt_config["response_truncation"]
                 prompt_template = current_prompt_config["template"]
 
-                print(f"Prompt Template: {prompt_template}")
-                
                 if history_mode == "all":
                     messages = req.messages
                 elif history_mode.startswith("initial+recent"):
@@ -2466,13 +2487,23 @@ class MultiIterAsyncvLLMEngine:
 
             req.add_message(message=model_response, is_tool_call=False, response_token_ids=model_response_token_ids)
             logging_message.append(
-                f"Turn {req.get_num_turns()} | Model time: {model_time:.2f}s | Model Response: {model_response} "
+                format_turn_model_summary(
+                    turn_index=req.get_num_turns(),
+                    model_time_s=model_time,
+                    prefill_tokens=len(prompt_token_ids),
+                    decode_tokens=len(model_response_token_ids),
+                    model_response=model_response,
+                )
             )
             #TODO: weiliu: here I think we should append user turn with profiler info
             if tool_response is not None:
                 req.add_message(message=tool_response, is_tool_call=True)
                 logging_message.append(
-                    f"Turn {req.get_num_turns()} | Env time: {env_step_time:.2f}s | Tool Response: {tool_response} "
+                    format_turn_env_summary(
+                        turn_index=req.get_num_turns(),
+                        env_time_s=env_step_time,
+                        tool_response=tool_response,
+                    )
                 )
 
             # Always store turn_info (reward_extra_info), even if tool_response is None
@@ -2498,6 +2529,23 @@ class MultiIterAsyncvLLMEngine:
                     sample_uuid=uuid,
                     entry_point=entry_point,
                     turn_index=req.get_num_turns(),
+                    prefill_tokens=len(prompt_token_ids),
+                    decode_tokens=len(model_response_token_ids),
+                    model_time_s=model_time,
+                    env_time_s=env_step_time,
+                    is_validate=is_validate,
+                    global_step=global_step,
+                ),
+            )
+            append_jsonl_event(
+                "generated_code",
+                build_generated_code_record(
+                    request_id=request_id,
+                    sample_uuid=uuid,
+                    entry_point=entry_point,
+                    turn_index=req.get_num_turns(),
+                    model_response=model_response,
+                    tool_response=tool_response,
                     prefill_tokens=len(prompt_token_ids),
                     decode_tokens=len(model_response_token_ids),
                     model_time_s=model_time,

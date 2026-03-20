@@ -9,7 +9,7 @@ from statistics import median
 
 
 def default_event_dir() -> Path:
-    return Path(__file__).resolve().parents[2] / "logs" / "structured"
+    return Path(__file__).resolve().parents[2] / "logs"
 
 
 def parse_args() -> argparse.Namespace:
@@ -19,7 +19,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "paths",
         nargs="*",
-        help="Optional jsonl files or directories. Defaults to drkernel/logs/structured/turn_token_stats*.jsonl",
+        help="Optional jsonl files or directories. Defaults to recursive discovery under drkernel/logs/**/structured/turn_token_stats*.jsonl",
     )
     parser.add_argument(
         "--max-round",
@@ -37,13 +37,13 @@ def parse_args() -> argparse.Namespace:
 
 def discover_jsonl_files(paths: list[str]) -> list[Path]:
     if not paths:
-        return sorted(default_event_dir().glob("turn_token_stats*.jsonl"))
+        return sorted(default_event_dir().rglob("structured/turn_token_stats*.jsonl"))
 
     discovered: list[Path] = []
     for raw_path in paths:
         path = Path(raw_path)
         if path.is_dir():
-            discovered.extend(sorted(path.glob("turn_token_stats*.jsonl")))
+            discovered.extend(sorted(path.rglob("turn_token_stats*.jsonl")))
         elif path.is_file():
             discovered.append(path)
     return discovered

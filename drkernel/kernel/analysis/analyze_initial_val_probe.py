@@ -664,7 +664,7 @@ def batch_analyze_init_val_logs(
         print(f"No init_val log directory found: {log_dir}", file=sys.stderr)
         return 1
 
-    log_paths = sorted(log_dir.glob("*.log"))
+    log_paths = sorted(log_dir.rglob("*.log"))
     if not log_paths:
         print(f"No .log files found in: {log_dir}")
         return 0
@@ -701,7 +701,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "log",
         nargs="?",
-        help="Optional single log path. If omitted, batch-process drkernel/logs/init_val/*.log.",
+        help="Optional single log path. If omitted, batch-process drkernel/logs/init_val/**/*.log.",
     )
     return parser.parse_args(argv[1:])
 

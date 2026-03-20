@@ -18,6 +18,7 @@ Kernel 奖励管理器，专门用于 kernel code RL 训练
 """
 
 from collections import defaultdict
+from datetime import datetime
 import torch
 import logging
 
@@ -304,6 +305,46 @@ class AsyncKernelRewardManager:
         if total_kernel_run_time_in_profiling_us > 0:
             time_coverage = custom_kernel_cuda_time_in_profiling_us / total_kernel_run_time_in_profiling_us
         reward_extra_info["time_coverage"] = float(f"{time_coverage:.2f}")
+
+        processing_time = results.get("processing_time")
+        if processing_time is not None:
+            try:
+                reward_extra_info["kg_processing_time_s"] = float(processing_time)
+            except (TypeError, ValueError):
+                pass
+
+        submitted_at = results.get("submitted_at")
+        completed_at = results.get("completed_at")
+        if submitted_at and completed_at:
+            try:
+                submitted_dt = datetime.fromisoformat(str(submitted_at))
+                completed_dt = datetime.fromisoformat(str(completed_at))
+                end_to_end_s = (completed_dt - submitted_dt).total_seconds()
+                reward_extra_info["kg_end_to_end_time_s"] = float(end_to_end_s)
+                if processing_time is not None:
+                    queue_wait_s = end_to_end_s - float(processing_time)
+                    reward_extra_info["kg_queue_wait_time_s"] = float(max(queue_wait_s, 0.0))
+            except Exception:
+                pass
+
+        if results.get("reference_runtime") is not None:
+            try:
+                reward_extra_info["kg_reference_runtime_ms"] = float(results["reference_runtime"])
+            except (TypeError, ValueError):
+                pass
+        if results.get("kernel_runtime") is not None:
+            try:
+                reward_extra_info["kg_kernel_runtime_ms"] = float(results["kernel_runtime"])
+            except (TypeError, ValueError):
+                pass
+
+        metadata = results.get("metadata") or {}
+        if isinstance(metadata, dict):
+            for key, value in metadata.items():
+                if not str(key).startswith("kg_"):
+                    continue
+                if isinstance(value, (bool, int, float)):
+                    reward_extra_info[key] = float(value)
 
         # reward_extra_info["correctness"].append(correctness)
         # reward_extra_info["performance"].append(speedup)

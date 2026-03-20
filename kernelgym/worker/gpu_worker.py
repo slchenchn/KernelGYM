@@ -8,6 +8,7 @@ import asyncio
 import logging
 import signal
 import sys
+import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 import redis.asyncio as redis
@@ -400,6 +401,7 @@ class GPUWorker:
     async def _process_toolkit_task(self, task_data: Dict[str, Any], start_time: datetime):
         """Process task via toolkit/backend abstractions."""
         task_id = task_data["task_id"]
+        timing_start = time.time()
 
         task_data["device"] = self.device
         if "toolkit" not in task_data:
@@ -407,7 +409,9 @@ class GPUWorker:
         if "backend_adapter" not in task_data:
             raise ValueError("Task payload missing required 'backend_adapter'")
 
+        run_toolkit_start = time.time()
         result_dict = await self._run_toolkit_task(task_data)
+        run_toolkit_s = time.time() - run_toolkit_start
 
         status = result_dict.get("status")
         error_message = result_dict.get("error_message") or "Task failed"
@@ -420,11 +424,41 @@ class GPUWorker:
             result_dict["status"] = "failed"
             result_dict["error_message"] = error_message
 
+        metadata = result_dict.setdefault("metadata", {})
+        metadata["wg_run_toolkit_s"] = run_toolkit_s
+
+        complete_task_start = time.time()
+        complete_task_start_mono_ns = time.monotonic_ns()
         await self.task_manager.complete_task(task_id, result_dict)
+        complete_task_s = time.time() - complete_task_start
+        metadata["wg_complete_task_s"] = complete_task_s
+        metadata["wg_total_s"] = time.time() - timing_start
+
+        tm_enter_mono_ns = metadata.get("tm_enter_monotonic_ns")
+        tm_exit_mono_ns = metadata.get("tm_exit_monotonic_ns")
+        if isinstance(tm_enter_mono_ns, int) and isinstance(tm_exit_mono_ns, int):
+            metadata["wg_before_tm_enter_s"] = max(
+                0.0, (tm_enter_mono_ns - complete_task_start_mono_ns) / 1e9
+            )
+            metadata["wg_after_tm_exit_s"] = max(
+                0.0, (time.monotonic_ns() - tm_exit_mono_ns) / 1e9
+            )
 
         processing_time = (datetime.now() - start_time).total_seconds()
         self._update_task_stats(processing_time, status == "completed")
 
+        logger.info(
+            f"[WorkerTiming] worker={self.worker_id} task={task_id} status={result_dict.get('status')} "
+            f"run_toolkit_s={run_toolkit_s:.2f} complete_task_s={complete_task_s:.2f} "
+            f"total_s={metadata['wg_total_s']:.2f}"
+        )
+        if "wg_before_tm_enter_s" in metadata and "wg_after_tm_exit_s" in metadata:
+            logger.info(
+                f"[WorkerCompleteBreakdown] worker={self.worker_id} task={task_id} "
+                f"before_tm_enter_s={metadata['wg_before_tm_enter_s']:.4f} "
+                f"tm_complete_task_s={metadata.get('tm_complete_task_s', -1.0):.4f} "
+                f"after_tm_exit_s={metadata['wg_after_tm_exit_s']:.4f}"
+            )
         logger.info(
             f"Worker {self.worker_id} completed task {task_id} in {processing_time:.2f}s"
         )
@@ -509,7 +543,13 @@ class GPUWorker:
             error_message = result_data.get("error_message", "Unknown error")
             raise RuntimeError(f"{error_type}: {error_message}")
 
-        return result_data["result"]
+        result = result_data["result"]
+        metadata = result.setdefault("metadata", {})
+        pool_timing = result_data.get("pool_timing") or {}
+        for key, value in pool_timing.items():
+            metadata[f"wg_{key}"] = value
+
+        return result
     
     def _update_task_stats(self, processing_time: float, success: bool):
         """Update task statistics."""

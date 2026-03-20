@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from time import perf_counter
 from typing import Any, Dict, Optional, Union
 
 import torch
@@ -23,6 +24,12 @@ from kernelgym.toolkit.kernelbench.timing import (
     run_profiling_only,
     time_execution_with_cuda_event,
 )
+
+
+def _record_phase_timing(metadata: Dict[str, Any], key: str, start_time: float) -> float:
+    elapsed = perf_counter() - start_time
+    metadata[key] = elapsed
+    return elapsed
 
 
 def _run_correctness_step(
@@ -148,7 +155,7 @@ def _run_performance_step(
             model_new = custom_model.cuda(device=device)
             torch.cuda.synchronize(device=device)
 
-            elapsed_times, profiling_metrics = time_execution_with_cuda_event(
+            elapsed_times, profiling_metrics, timing_info = time_execution_with_cuda_event(
                 model_new,
                 *inputs,
                 num_trials=num_perf_trials,
@@ -157,6 +164,18 @@ def _run_performance_step(
                 enable_profiling=enable_profiling,
             )
             runtime_stats = get_timing_stats(elapsed_times, device=device)
+            metadata["kg_kernel_perf_warmup_s"] = timing_info["warmup_wall_s"]
+            metadata["kg_kernel_perf_measure_wall_s"] = timing_info["measure_wall_s"]
+            metadata["kg_kernel_perf_measure_cuda_event_s"] = timing_info[
+                "timed_trials_cuda_event_s"
+            ]
+            metadata["kg_kernel_perf_profile_s"] = timing_info["profiling_wall_s"]
+            metadata["kg_kernel_perf_total_s"] = timing_info["total_wall_s"]
+            metadata["kg_kernel_perf_num_trials"] = timing_info["num_trials"]
+            metadata["kg_kernel_perf_num_warmup"] = timing_info["num_warmup"]
+            metadata["kg_kernel_perf_num_profile_trials"] = timing_info[
+                "num_profiling_trials"
+            ]
 
             if enable_profiling and _profiling_empty(profiling_metrics):
                 retry_count = max(0, int(getattr(settings, "profiling_retry_count", 0)))
@@ -361,6 +380,7 @@ def eval_kernel_against_ref(
     metadata: Dict[str, Any] = {}
     metadata["hardware"] = torch.cuda.get_device_name(device=device)
     metadata["device"] = str(device)
+    overall_start = perf_counter()
 
     if is_triton:
         if isinstance(device, int):
@@ -377,14 +397,19 @@ def eval_kernel_against_ref(
         print(f"[Eval] Start Evalulation! on device: {device}")
         print("[Eval] Loading Original Model")
 
+    load_original_start = perf_counter()
     Model, get_init_inputs, get_inputs = load_original_model_and_inputs(
         original_model_src, context, entry_point
     )
+    _record_phase_timing(metadata, "kg_kernel_load_original_src_s", load_original_start)
+
+    init_inputs_start = perf_counter()
     set_seed(seed_num)
     init_inputs = get_init_inputs()
     init_inputs = [
         x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in init_inputs
     ]
+    _record_phase_timing(metadata, "kg_kernel_prepare_init_inputs_s", init_inputs_start)
 
     print(f"[DEBUG] init inputs: {init_inputs}")
 
@@ -397,6 +422,7 @@ def eval_kernel_against_ref(
         init_inputs = init_inputs[1]
 
     with torch.no_grad():
+        original_model_start = perf_counter()
         set_seed(seed_num)
 
         if type(init_inputs) == list:
@@ -407,6 +433,7 @@ def eval_kernel_against_ref(
         assert hasattr(original_model, "forward")
         if verbose:
             print("[Eval] Original Model Loaded")
+    _record_phase_timing(metadata, "kg_kernel_build_reference_model_s", original_model_start)
     if verbose:
         print("[Eval] Loading and Compiling New Model with Custom CUDA Kernel")
 
@@ -425,6 +452,7 @@ def eval_kernel_against_ref(
 
     try:
         os.environ["TORCH_USE_CUDA_DSA"] = "1"
+        compile_start = perf_counter()
         if backend_adapter is not None:
             artifact = backend_adapter.compile(
                 custom_model_src,
@@ -464,6 +492,7 @@ def eval_kernel_against_ref(
             else:
                 ModelNew = load_custom_model(custom_model_src, context, build_dir)
         torch.cuda.synchronize(device=device)
+        _record_phase_timing(metadata, "kg_kernel_compile_and_load_s", compile_start)
     except Exception as e:
         print(
             f"Failed to compile custom CUDA kernel: Record as compilation failure. \nError: {e}"
@@ -493,11 +522,13 @@ def eval_kernel_against_ref(
             return ModelNew(**init_inputs)
 
         with torch.no_grad():
+            custom_model_start = perf_counter()
             set_seed(seed_num)
             custom_model = _create_custom_model()
 
             assert hasattr(custom_model, "forward")
             torch.cuda.synchronize(device=device)
+        _record_phase_timing(metadata, "kg_kernel_build_custom_model_s", custom_model_start)
         if verbose:
             print("[Eval] New Model with Custom CUDA Kernel Loaded")
     except RuntimeError as e:
@@ -512,6 +543,7 @@ def eval_kernel_against_ref(
 
     kernel_exec_result = None
 
+    correctness_start = perf_counter()
     kernel_exec_result = _run_correctness_step(
         original_model,
         custom_model,
@@ -522,7 +554,9 @@ def eval_kernel_against_ref(
         seed_num,
         device,
     )
+    _record_phase_timing(metadata, "kg_kernel_correctness_s", correctness_start)
 
+    triton_detect_start = perf_counter()
     decoy_detected = _run_triton_detection_step(
         enable_triton_detection=enable_triton_detection,
         is_triton=is_triton,
@@ -535,7 +569,9 @@ def eval_kernel_against_ref(
         verbose=verbose,
         backend=backend,
     )
+    _record_phase_timing(metadata, "kg_kernel_triton_detect_s", triton_detect_start)
     if decoy_detected:
+        metadata["kg_kernel_total_s"] = perf_counter() - overall_start
         _cleanup()
         return kernel_exec_result
 
@@ -552,6 +588,7 @@ def eval_kernel_against_ref(
             enable_profiling=enable_profiling,
         )
 
+    metadata["kg_kernel_total_s"] = perf_counter() - overall_start
     _cleanup()
     return kernel_exec_result
 
@@ -582,6 +619,7 @@ def eval_reference_only(
     metadata: Dict[str, Any] = {}
     metadata["hardware"] = torch.cuda.get_device_name(device=device)
     metadata["device"] = str(device)
+    overall_start = perf_counter()
 
     context: Dict[str, Any] = {}
 
@@ -590,23 +628,30 @@ def eval_reference_only(
         print("[Eval] Loading Original Model")
 
     try:
+        load_original_start = perf_counter()
         Model, get_init_inputs, get_inputs = load_original_model_and_inputs(
             original_model_src, context, entry_point
         )
+        _record_phase_timing(metadata, "kg_reference_load_original_src_s", load_original_start)
+
+        init_inputs_start = perf_counter()
         set_seed(seed_num)
         init_inputs = get_init_inputs()
         init_inputs = [
             x.cuda(device=device) if isinstance(x, torch.Tensor) else x
             for x in init_inputs
         ]
+        _record_phase_timing(metadata, "kg_reference_prepare_init_inputs_s", init_inputs_start)
 
         with torch.no_grad():
+            original_model_start = perf_counter()
             set_seed(seed_num)
             if type(init_inputs) == list:
                 original_model = Model(*init_inputs)
             else:
                 original_model = Model(**init_inputs)
             assert hasattr(original_model, "forward")
+        _record_phase_timing(metadata, "kg_reference_build_model_s", original_model_start)
         if verbose:
             print("[Eval] Original Model Loaded")
 
@@ -630,6 +675,7 @@ def eval_reference_only(
             for x in inputs
         ]
         model = original_model.cuda(device=device)
+        metadata["kg_reference_backend_compile_s"] = 0.0
         if reference_backend:
             backend_name = reference_backend.lower()
             metadata["reference_backend"] = backend_name
@@ -638,7 +684,9 @@ def eval_reference_only(
                 try:
                     if not hasattr(torch, "compile"):
                         raise RuntimeError("torch.compile is not available")
+                    compile_start = perf_counter()
                     model = torch.compile(model)
+                    metadata["kg_reference_backend_compile_s"] = perf_counter() - compile_start
                     metadata["reference_backend_compiled"] = True
                     print("[Eval] torch.compile succeeded")
                 except Exception as e:
@@ -647,7 +695,7 @@ def eval_reference_only(
                     return KernelExecResult(compiled=False, correctness=False, metadata=metadata)
         torch.cuda.synchronize(device=device)
 
-        elapsed_times, _ = time_execution_with_cuda_event(
+        elapsed_times, _, timing_info = time_execution_with_cuda_event(
             model,
             *inputs,
             num_trials=num_perf_trials,
@@ -656,6 +704,14 @@ def eval_reference_only(
             enable_profiling=False,
         )
         runtime_stats = get_timing_stats(elapsed_times, device=device)
+        metadata["kg_reference_perf_warmup_s"] = timing_info["warmup_wall_s"]
+        metadata["kg_reference_perf_measure_wall_s"] = timing_info["measure_wall_s"]
+        metadata["kg_reference_perf_measure_cuda_event_s"] = timing_info[
+            "timed_trials_cuda_event_s"
+        ]
+        metadata["kg_reference_perf_total_s"] = timing_info["total_wall_s"]
+        metadata["kg_reference_perf_num_trials"] = timing_info["num_trials"]
+        metadata["kg_reference_perf_num_warmup"] = timing_info["num_warmup"]
 
         if verbose:
             print(f"[Eval] Performance Stats: {runtime_stats}")
@@ -666,5 +722,6 @@ def eval_reference_only(
             print(f"[Eval] Error in Measuring Performance: {e}")
         kernel_exec_result.metadata["error_during_performance"] = e
 
+    metadata["kg_reference_total_s"] = perf_counter() - overall_start
     graceful_eval_cleanup(context, device, None)
     return kernel_exec_result

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -21,21 +22,26 @@ def time_execution_with_cuda_event(
     verbose: bool = True,
     device: torch.device = None,
     enable_profiling: bool = False,
-) -> Tuple[List[float], Dict[str, Any]]:
+) -> Tuple[List[float], Dict[str, Any], Dict[str, Any]]:
     if device is None:
         if verbose:
             print(f"Using current device: {torch.cuda.current_device()}")
         device = torch.cuda.current_device()
 
+    overall_start = perf_counter()
+
+    warmup_start = perf_counter()
     for _ in range(num_warmup):
         kernel_fn(*args)
         torch.cuda.synchronize(device=device)
+    warmup_wall_s = perf_counter() - warmup_start
 
     print(
         f"[Profiling] Using device: {device} {torch.cuda.get_device_name(device)}, warm up {num_warmup}, trials {num_trials}"
     )
     elapsed_times = []
 
+    measure_start = perf_counter()
     for trial in range(num_trials):
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
@@ -50,8 +56,10 @@ def time_execution_with_cuda_event(
         if verbose:
             print(f"Trial {trial + 1}: {elapsed_time_ms:.3g} ms")
         elapsed_times.append(elapsed_time_ms)
+    measure_wall_s = perf_counter() - measure_start
 
     profiling_metrics: Dict[str, Any] = {}
+    profiling_wall_s = 0.0
     if enable_profiling:
         try:
             torch.cuda.synchronize(device=device)
@@ -61,10 +69,12 @@ def time_execution_with_cuda_event(
                 f"[Profiling] Running {num_profiling_trials} additional iterations for profiling..."
             )
 
+            profiling_start = perf_counter()
             with profiling_context(True) as prof:
                 for _ in range(num_profiling_trials):
                     kernel_fn(*args)
                 torch.cuda.synchronize(device=device)
+            profiling_wall_s = perf_counter() - profiling_start
 
             profiling_metrics = extract_profiling_metrics(prof)
             if profiling_metrics:
@@ -79,7 +89,18 @@ def time_execution_with_cuda_event(
             print(f"[Profiling] Warning: Profiling failed: {e}")
             profiling_metrics = {"profiling_error": str(e)}
 
-    return elapsed_times, profiling_metrics
+    timing_info = {
+        "warmup_wall_s": warmup_wall_s,
+        "measure_wall_s": measure_wall_s,
+        "profiling_wall_s": profiling_wall_s,
+        "timed_trials_cuda_event_s": sum(elapsed_times) / 1000.0,
+        "num_warmup": num_warmup,
+        "num_trials": num_trials,
+        "num_profiling_trials": min(10, num_trials) if enable_profiling else 0,
+        "total_wall_s": perf_counter() - overall_start,
+    }
+
+    return elapsed_times, profiling_metrics, timing_info
 
 
 def run_profiling_only(

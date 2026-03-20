@@ -386,10 +386,29 @@ class SubprocessWorkerPool:
         retry_count = 0
         last_error = None
         is_timeout_error = False  # Track if error was timeout
+        task_id = task_data.get("task_id", "unknown")
+        request_start = time.time()
+        total_idle_wait_s = 0.0
+        total_restart_s = 0.0
+        last_execute_s = 0.0
+        last_return_s = 0.0
+
+        def _build_pool_timing(total_s: Optional[float] = None) -> Dict[str, Any]:
+            final_total = time.time() - request_start if total_s is None else total_s
+            return {
+                "pool_idle_wait_s": total_idle_wait_s,
+                "pool_execute_s": last_execute_s,
+                "pool_restart_s": total_restart_s,
+                "pool_return_s": last_return_s,
+                "pool_total_s": final_total,
+                "pool_retry_count": retry_count,
+            }
 
         while retry_count <= max_retries:
             # 获取空闲 worker
+            idle_wait_start = time.time()
             worker = await self._get_idle_worker(timeout=timeout)
+            total_idle_wait_s += time.time() - idle_wait_start
 
             if worker is None:
                 # 所有 workers 都忙，等待一下再试
@@ -400,12 +419,14 @@ class SubprocessWorkerPool:
             try:
                 # 执行任务（在线程池中执行，避免阻塞 asyncio）
                 loop = asyncio.get_event_loop()
+                execute_start = time.time()
                 result = await loop.run_in_executor(
                     None,
                     worker.execute_task,
                     task_data,
                     timeout
                 )
+                last_execute_s = time.time() - execute_start
 
                 # 任务完成
                 self.total_tasks_processed += 1
@@ -415,7 +436,19 @@ class SubprocessWorkerPool:
                     logger.warning(
                         f"[{worker.worker_id}] Worker needs restart after task"
                     )
+                    restart_start = time.time()
                     await self._restart_worker(worker)
+                    total_restart_s += time.time() - restart_start
+
+                pool_timing = _build_pool_timing()
+                result["pool_timing"] = pool_timing
+                logger.info(
+                    f"[PoolTiming] device=cuda:{self.device_id} worker={worker.worker_id} "
+                    f"task={task_id} status=success idle_wait_s={pool_timing['pool_idle_wait_s']:.2f} "
+                    f"execute_s={pool_timing['pool_execute_s']:.2f} restart_s={pool_timing['pool_restart_s']:.2f} "
+                    f"return_s={pool_timing['pool_return_s']:.2f} total_s={pool_timing['pool_total_s']:.2f} "
+                    f"retries={pool_timing['pool_retry_count']}"
+                )
 
                 return result
 
@@ -437,10 +470,20 @@ class SubprocessWorkerPool:
                     )
 
                 # 尝试重启 worker
+                restart_start = time.time()
                 await self._restart_worker(worker)
+                total_restart_s += time.time() - restart_start
 
                 # Don't retry if timeout - exit immediately to free up worker queue
                 if is_timeout_error:
+                    pool_timing = _build_pool_timing()
+                    logger.info(
+                        f"[PoolTiming] device=cuda:{self.device_id} worker={worker.worker_id} "
+                        f"task={task_id} status=timeout idle_wait_s={pool_timing['pool_idle_wait_s']:.2f} "
+                        f"execute_s={pool_timing['pool_execute_s']:.2f} restart_s={pool_timing['pool_restart_s']:.2f} "
+                        f"return_s={pool_timing['pool_return_s']:.2f} total_s={pool_timing['pool_total_s']:.2f} "
+                        f"retries={pool_timing['pool_retry_count']}"
+                    )
                     logger.error(
                         f"[{worker.worker_id}] Task failed due to timeout, "
                         f"not retrying to free up worker queue"
@@ -452,7 +495,9 @@ class SubprocessWorkerPool:
 
             finally:
                 # 归还 worker 到 idle pool（如果还存活）
+                return_start = time.time()
                 await self._return_worker(worker)
+                last_return_s = time.time() - return_start
 
         # Failed after all retries (or timeout)
         if is_timeout_error:
@@ -462,6 +507,14 @@ class SubprocessWorkerPool:
                 f"Not retried to avoid blocking worker queue."
             )
         else:
+            pool_timing = _build_pool_timing()
+            logger.info(
+                f"[PoolTiming] device=cuda:{self.device_id} task={task_id} status=failed "
+                f"idle_wait_s={pool_timing['pool_idle_wait_s']:.2f} "
+                f"execute_s={pool_timing['pool_execute_s']:.2f} restart_s={pool_timing['pool_restart_s']:.2f} "
+                f"return_s={pool_timing['pool_return_s']:.2f} total_s={pool_timing['pool_total_s']:.2f} "
+                f"retries={pool_timing['pool_retry_count']}"
+            )
             raise RuntimeError(
                 f"[GPU {self.device_id}] Task failed after {max_retries} retries. "
                 f"Last error: {last_error}"

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -410,19 +411,48 @@ class TaskManager:
         return task_json
 
     async def complete_task(self, task_id: str, result: Dict[str, Any]):
+        timing_start = time.time()
+        timing_start_mono_ns = time.monotonic_ns()
         completed_at = datetime.now().isoformat()
-        payload = json.dumps(result)
-        await self.redis.hset(
-            f"{self.result_prefix}{task_id}",
-            mapping={"result": payload, "completed_at": completed_at},
-        )
+        metadata = result.setdefault("metadata", {})
+        metadata["tm_enter_monotonic_ns"] = timing_start_mono_ns
+
+        status_hset_start = time.time()
         await self.redis.hset(
             f"{self.task_prefix}{task_id}",
             mapping={"status": TaskStatus.COMPLETED.value, "completed_at": completed_at},
         )
+        status_hset_s = time.time() - status_hset_start
+        metadata["tm_status_hset_s"] = status_hset_s
+
+        json_start = time.time()
+        payload = json.dumps(result)
+        json_dumps_s = time.time() - json_start
+
+        result_hset_start = time.time()
+        await self.redis.hset(
+            f"{self.result_prefix}{task_id}",
+            mapping={"result": payload, "completed_at": completed_at},
+        )
+        result_hset_s = time.time() - result_hset_start
+
+        metadata["tm_json_dumps_s"] = json_dumps_s
+        metadata["tm_result_hset_s"] = result_hset_s
+        metadata["tm_complete_task_s"] = time.time() - timing_start
+        metadata["tm_exit_monotonic_ns"] = time.monotonic_ns()
         if task_id in self.active_tasks:
             self.active_tasks[task_id].status = TaskStatus.COMPLETED
             self.active_tasks[task_id].completed_at = datetime.fromisoformat(completed_at)
+
+        logger.info(
+            "[TaskManagerTiming] task=%s json_dumps_s=%.4f result_hset_s=%.4f "
+            "status_hset_s=%.4f total_s=%.4f",
+            task_id,
+            json_dumps_s,
+            result_hset_s,
+            status_hset_s,
+            metadata["tm_complete_task_s"],
+        )
 
     async def fail_task(
         self,

@@ -51,6 +51,11 @@ from vllm.v1.executor.abstract import Executor
 from vllm.worker.worker_base import WorkerWrapperBase
 
 
+from kernel.event_logging import (
+    append_jsonl_event,
+    build_env_result_record,
+    format_env_result_summary,
+)
 from kernel.workers.agent import BaseAgent, KernelAgent
 from verl_patch.workers.code.agent_env import (
     BaseEnv,
@@ -2170,7 +2175,9 @@ class MultiIterAsyncvLLMEngine:
         current_turn_count = req.get_num_turns() + 1
         env_done = current_turn_count >= self.max_agent_turns
 
-        print(f"Env Result: {env_result}")
+        env_result_record = build_env_result_record(env_result)
+        append_jsonl_event("env_result", env_result_record)
+        print(format_env_result_summary(env_result))
 
 
         return (

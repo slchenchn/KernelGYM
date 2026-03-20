@@ -23,6 +23,11 @@ from uuid import uuid4
 import httpx
 import ray
 
+from kernel.event_logging import (
+    append_jsonl_event,
+    build_batch_heartbeat_record,
+    format_batch_heartbeat_summary,
+)
 from verl.tools.sandbox_fusion_tools import TokenBucketWorker
 
 
@@ -720,12 +725,17 @@ class KernelRewardClient:
                         info = idx_to_task_info[p_idx]
                         pending_tasks_info.append(f"task_id={info['task_id']} entry={info['entry_point']} uuid={info['uuid'][:8] if info['uuid'] else 'N/A'}")
                 
-                pending_summary = "; ".join(pending_tasks_info) if pending_tasks_info else "N/A"
-                if len(pending) > 10:
-                    pending_summary += f" ... (+{len(pending)-10} more)"
-                
-                print(f"[BatchHeartbeat] hybrid: completed={len(results)}/{len(obj_refs)}, pending={len(pending)}, elapsed={elapsed:.1f}s tokens_in_use={in_use}/{self.rate_limit}")
-                print(f"[BatchHeartbeat] pending_tasks: {pending_summary}")
+                heartbeat = build_batch_heartbeat_record(
+                    completed=len(results),
+                    total=len(obj_refs),
+                    pending=len(pending),
+                    elapsed=elapsed,
+                    tokens_in_use=in_use,
+                    rate_limit=self.rate_limit,
+                    pending_tasks_info=pending_tasks_info,
+                )
+                append_jsonl_event("batch_heartbeat", heartbeat)
+                print(format_batch_heartbeat_summary(heartbeat))
         # Merge back to original order.
         merged: List[Optional[Dict[str, Any]]] = [None] * len(tasks)
         # Fill prefilled first.

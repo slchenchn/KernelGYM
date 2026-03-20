@@ -213,3 +213,30 @@ def format_batch_heartbeat_summary(record: Dict[str, Any]) -> str:
         f"elapsed={record['elapsed_s']:.1f}s "
         f"tokens_in_use={record['tokens_in_use']}/{record['rate_limit']}"
     )
+
+
+def build_turn_token_record(
+    *,
+    request_id: str,
+    turn_index: int,
+    prefill_tokens: int,
+    decode_tokens: int,
+    model_time_s: float,
+    env_time_s: float,
+    is_validate: bool,
+    global_step: int,
+    sample_uuid: str | None = None,
+    entry_point: str | None = None,
+) -> Dict[str, Any]:
+    return {
+        "request_id": request_id,
+        "sample_uuid": sample_uuid,
+        "entry_point": entry_point,
+        "turn_index": int(turn_index),
+        "prefill_tokens": int(prefill_tokens),
+        "decode_tokens": int(decode_tokens),
+        "model_time_s": float(model_time_s),
+        "env_time_s": float(env_time_s),
+        "is_validate": bool(is_validate),
+        "global_step": int(global_step),
+    }

@@ -53,6 +53,7 @@ from vllm.worker.worker_base import WorkerWrapperBase
 
 from kernel.event_logging import (
     append_jsonl_event,
+    build_turn_token_record,
     build_env_result_record,
     format_env_result_summary,
 )
@@ -2668,6 +2669,21 @@ class MultiIterAsyncvLLMEngine:
             all_turn_responses.append(model_response_token_ids)
             all_logprobs.append(model_logprobs)
             all_turn_lengths.append(len(model_response_token_ids))
+            append_jsonl_event(
+                "turn_token_stats",
+                build_turn_token_record(
+                    request_id=request_id,
+                    sample_uuid=uuid,
+                    entry_point=entry_point,
+                    turn_index=req.get_num_turns(),
+                    prefill_tokens=len(prompt_token_ids),
+                    decode_tokens=len(model_response_token_ids),
+                    model_time_s=model_time,
+                    env_time_s=env_step_time,
+                    is_validate=is_validate,
+                    global_step=global_step,
+                ),
+            )
 
             # Check if we got an error response
             # if turn_done and "error" in turn_info:

@@ -9,3 +9,4 @@ PROGRESS.md
 outputs/
 wandb/
 checkpoints/
+kernelgym/*probe*/

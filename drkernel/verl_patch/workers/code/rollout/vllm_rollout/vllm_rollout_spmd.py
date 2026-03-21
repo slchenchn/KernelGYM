@@ -44,13 +44,13 @@ from verl.utils.torch_functional import get_response_mask, pad_2d_list_to_length
 from verl.workers.rollout.base import BaseRollout
 from vllm import LLM, SamplingParams
 from vllm.distributed import parallel_state as vllm_ps
-from vllm.worker.worker_base import WorkerWrapperBase
 
 from verl_patch.utils.random import save_random_states, set_random_states
 from verl_patch.workers.code.rollout.vllm_rollout.vllm_config_helper import (
     get_vllm_config_kwargs,
     verify_importance_sampling_safety,
 )
+from verl_patch.workers.code.rollout.vllm_rollout.vllm_compat import WorkerWrapperBase, build_worker_wrapper
 
 # TODO
 # 1. support pp in vllm
@@ -469,7 +469,14 @@ class vLLMAsyncRollout:
         all_kwargs[0]["local_rank"] = 0
 
         self.vllm_config = all_kwargs[0]["vllm_config"]
-        self.inference_engine = WorkerWrapperBase(vllm_config=self.vllm_config)
+        self.inference_engine = build_worker_wrapper(
+            vllm_config=self.vllm_config,
+            rpc_rank=0,
+            # External executors hand each actor a single-worker kwargs/config
+            # slice. Keep the wrapper on executor-local rank 0, while the real
+            # distributed rank still flows through all_kwargs[0]["rank"].
+            global_rank=0,
+        )
         self.inference_engine.init_worker(all_kwargs)
 
     def load_model(self, *args, **kwargs):

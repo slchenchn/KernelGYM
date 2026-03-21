@@ -10,20 +10,20 @@ from verl.third_party.vllm import VLLM_SLEEP_LEVEL
 from verl.utils.fs import copy_to_local
 from verl.workers.rollout.async_server import AsyncServerBase, TokenOutput
 from vllm import SamplingParams
-from vllm.config import CompilationConfig, CompilationLevel
+from vllm.config import CompilationConfig, CompilationMode
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ErrorResponse,
-)
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.v1.engine.async_llm import AsyncLLM
 
+from verl_patch.workers.code.rollout.vllm_rollout.vllm_compat import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ErrorResponse,
+    build_openai_chat_serving,
+    get_error_response_code,
+)
 from verl_patch.workers.code.rollout.vllm_rollout.vllm_async_engine import (
     AsyncServerBase,
     ExternalRayDistributedExecutor,
@@ -109,7 +109,8 @@ class AsyncvLLMServer(AsyncServerBase):
         if not config.enforce_eager and cudagraph_capture_sizes:
             if isinstance(cudagraph_capture_sizes, ListConfig):
                 compilation_config["compilation_config"] = CompilationConfig(
-                    level=CompilationLevel.PIECEWISE, cudagraph_capture_sizes=cudagraph_capture_sizes
+                    mode=CompilationMode.VLLM_COMPILE,
+                    cudagraph_capture_sizes=cudagraph_capture_sizes,
                 )
             else:
                 logger.warning(f"cudagraph_capture_sizes must be a list, but got {cudagraph_capture_sizes}")
@@ -149,17 +150,12 @@ class AsyncvLLMServer(AsyncServerBase):
         self.engine = AsyncLLM.from_vllm_config(vllm_config)
 
         # build serving chat
-        model_config = self.engine.model_config
-        BASE_MODEL_PATHS = [BaseModelPath(name=model_name, model_path=model_path)]
-        models = OpenAIServingModels(self.engine, model_config, BASE_MODEL_PATHS)
-        self.openai_serving_chat = OpenAIServingChat(
+        _, self.openai_serving_chat = build_openai_chat_serving(
             self.engine,
-            model_config,
-            models,
-            "assistant",
+            model_name=model_name,
+            model_path=model_path,
             request_logger=RequestLogger(max_log_len=4096),
-            chat_template=None,
-            chat_template_content_format="auto",
+            response_role="assistant",
             enable_auto_tools=config.multi_turn.tool_config_path is not None,
             tool_parser=config.multi_turn.format,  # hermes, llama3_json, ...
         )
@@ -188,7 +184,7 @@ class AsyncvLLMServer(AsyncServerBase):
         generator = await self.openai_serving_chat.create_chat_completion(request, raw_request)
 
         if isinstance(generator, ErrorResponse):
-            return JSONResponse(content=generator.model_dump(), status_code=generator.code)
+            return JSONResponse(content=generator.model_dump(), status_code=get_error_response_code(generator))
         if request.stream:
             return StreamingResponse(content=generator, media_type="text/event-stream")
         else:

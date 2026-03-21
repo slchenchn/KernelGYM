@@ -99,6 +99,31 @@ class _HybridHttpWorker:
                     except Exception:
                         pass
                     if resp.status_code == 200:
+                        try:
+                            payload = resp.json()
+                        except Exception:
+                            payload = None
+                        # KernelGym's current /evaluate endpoint is synchronous: it
+                        # returns the final EvaluationResponse after workflow
+                        # completion rather than a queue acknowledgement. When that
+                        # shape is detected, return the payload directly instead of
+                        # falling back to the old submit-then-poll path.
+                        if isinstance(payload, dict) and (
+                            payload.get("status") in ("completed", "failed", "timeout", "cancelled")
+                            or any(
+                                key in payload
+                                for key in (
+                                    "reward",
+                                    "score",
+                                    "success",
+                                    "correctness",
+                                    "compiled",
+                                    "error",
+                                    "error_message",
+                                )
+                            )
+                        ):
+                            return payload
                         break
                     if resp.status_code in (429, 503):
                         time.sleep(self._backoff(attempt, base=2 if resp.status_code == 429 else 5))
@@ -125,10 +150,32 @@ class _HybridHttpWorker:
             # Poll status at a fixed 1s interval.
             task_id = task_data.get("task_id", "")
             last_status = None
+            missing_status_polls = 0
+            first_missing_status_ts: float | None = None
             while time.time() - start_ts < client_timeout:
                 try:
                     s = self._client.get(f"{self.server_url}/status/{task_id}")
+                    if s.status_code == 404:
+                        missing_status_polls += 1
+                        if first_missing_status_ts is None:
+                            first_missing_status_ts = time.time()
+                        # A freshly submitted task can briefly return 404 before the
+                        # server materializes status. If it stays missing for several
+                        # polls, treat it as terminal instead of burning the entire
+                        # client timeout window.
+                        if missing_status_polls >= 5 or (time.time() - first_missing_status_ts) >= 5.0:
+                            return {
+                                "status": "failed",
+                                "error_message": (
+                                    f"Task status missing on reward server after submit: "
+                                    f"{task_id} (HTTP 404)"
+                                ),
+                            }
+                        time.sleep(1.0)
+                        continue
                     if s.status_code == 200:
+                        missing_status_polls = 0
+                        first_missing_status_ts = None
                         data = s.json()
                         status = data.get("status", "unknown")
                         if status != last_status:

@@ -12,7 +12,7 @@ pip install -e . --no-build-isolation --no-deps
 
 pip install --no-cache-dir "ray==2.47.1"
 
-pip install --no-cache-dir "vllm==0.10.2" "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" tensordict torchdata \
+pip install --no-cache-dir "vllm==0.18.0" "torch==2.10.0" "torchvision==0.25.0" "torchaudio==2.10.0" tensordict torchdata \
     "transformers[hf_xet]==4.56.0" accelerate datasets peft hf-transfer \
     "numpy<2.0.0" "pyarrow>=15.0.0" pandas \
     codetiming hydra-core pylatexenc qwen-vl-utils dill pybind11 liger-kernel mathruler decord torchcodec \

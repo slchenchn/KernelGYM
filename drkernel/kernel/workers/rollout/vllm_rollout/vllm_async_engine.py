@@ -35,19 +35,10 @@ from verl.workers.rollout.schemas import (
 )
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ErrorResponse,
-)
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.executor.abstract import Executor
-from vllm.worker.worker_base import WorkerWrapperBase
 
 
 from kernel.event_logging import (
@@ -65,6 +56,7 @@ from verl_patch.workers.code.agent_env import (
     FinishReasonTypeEnum,
     create_environment,
 )
+from verl_patch.workers.code.rollout.vllm_rollout.vllm_compat import WorkerWrapperBase
 from verl_patch.workers.code.agent import (
     MathAgent,
     CodeAgent,

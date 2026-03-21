@@ -58,6 +58,13 @@ max_num_batched_tokens: 8192
 # max length for rollout
 max_model_len: null
 
+# Optional rollout-only model/tokenizer override. Useful when rollout should
+# load a different inference checkpoint than the actor, e.g. quantized weights.
+model_path: null
+tokenizer_path: null
+online_quantization_preset: null
+online_quantization_ignore: ["lm_head"]
+
 # max length of sequences
 max_num_seqs: 1024
 

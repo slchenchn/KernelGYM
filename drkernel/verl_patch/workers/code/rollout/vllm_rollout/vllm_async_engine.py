@@ -38,19 +38,9 @@ from verl.workers.rollout.schemas import (
 )
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_timeout import asyncio_timeout as vllm_timeout
-from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    ErrorResponse,
-)
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.inputs import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.executor.abstract import Executor
-from vllm.worker.worker_base import WorkerWrapperBase
 from vllm.outputs import RequestOutput
 
 from verl_patch.workers.code.agent import BaseAgent, create_agent
@@ -59,9 +49,20 @@ from verl_patch.workers.code.agent_env import (
     FinishReasonTypeEnum,
     create_environment,
 )
-from verl_patch.workers.code.reward_manager import CodeRewardManager, MathRewardManager
+from verl_patch.workers.code.rollout.vllm_rollout.vllm_compat import WorkerWrapperBase
+from verl_patch.workers.code.reward_manager import CodeRewardManager
 from collections import defaultdict
 import re
+
+try:
+    from vllm.engine.async_timeout import asyncio_timeout as vllm_timeout
+except ModuleNotFoundError:
+    from asyncio import timeout as vllm_timeout
+
+try:
+    from verl_patch.workers.code.reward_manager import MathRewardManager
+except ImportError:
+    MathRewardManager = None
 
 
 @ray.remote
@@ -506,7 +507,7 @@ class AsyncvLLMEngine:
         for i, (messages, tokens) in enumerate(zip(raw_prompts, tokens_ids)):
             if not isinstance(messages, list):
                 messages = messages.tolist()
-            if isinstance(self.reward_fn, MathRewardManager):
+            if MathRewardManager is not None and isinstance(self.reward_fn, MathRewardManager):
                 extra_info = {
                     'ground_truth': prompts[i].non_tensor_batch['reward_model']['ground_truth'],
                     'data_source': prompts[i].non_tensor_batch['data_source'],

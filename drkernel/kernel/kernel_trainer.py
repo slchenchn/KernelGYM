@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from collections import defaultdict
 from copy import deepcopy
@@ -1639,9 +1640,11 @@ class RayKernelTrainer(RayPPOTrainer):
                     "prompt_oversampling_factor", 1.0
                 )
                 if prompt_oversample > 1.0:
-                    train_batch_size = int(train_batch_size * prompt_oversample)
-                    # Round batch size to world size multiple
-                    train_batch_size = int(train_batch_size // world_size * world_size)
+                    # Use ceil so the configured factor is honored instead of being
+                    # silently rounded down back to the smaller effective batch.
+                    train_batch_size = math.ceil(
+                        train_batch_size * prompt_oversample
+                    )
 
             self.train_dataloader = StatefulDataLoader(
                 dataset=self.train_dataset,

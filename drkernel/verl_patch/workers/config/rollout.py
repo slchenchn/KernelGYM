@@ -171,6 +171,10 @@ class RolloutConfig(BaseConfig):
 
     enable_chunked_prefill: bool = True
     load_format: str = "dummy_dtensor"
+    model_path: Optional[str] = None
+    tokenizer_path: Optional[str] = None
+    online_quantization_preset: Optional[str] = None
+    online_quantization_ignore: list[str] = field(default_factory=lambda: ["lm_head"])
 
     layered_summon: bool = False
 

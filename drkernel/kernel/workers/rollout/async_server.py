@@ -58,6 +58,149 @@ from kernel.workers.rollout.vllm_rollout.vllm_async_engine_multi_iter import (
 logger = logging.getLogger(__file__)
 
 
+def _dataproto_num_rows(data: Optional[DataProto]) -> int:
+    if data is None:
+        return 0
+    try:
+        batch_size = getattr(data.batch, "batch_size", None)
+        if batch_size:
+            return int(batch_size[0])
+    except Exception:
+        pass
+    try:
+        return int(data.batch["input_ids"].shape[0])
+    except Exception:
+        return 0
+
+
+def _split_dataproto_for_workers(
+    data: DataProto,
+    workers: list[Any],
+) -> tuple[list[DataProto], list[Any]]:
+    """Split DataProto into near-even slices without requiring exact divisibility."""
+    num_workers = len(workers)
+    total_rows = len(data)
+    if num_workers == 0 or total_rows == 0:
+        return [], []
+    if total_rows % num_workers == 0:
+        return data.chunk(num_workers), list(workers)
+
+    base, remainder = divmod(total_rows, num_workers)
+    chunks: list[DataProto] = []
+    active_workers: list[Any] = []
+    start = 0
+    for worker_idx, worker in enumerate(workers):
+        chunk_size = base + (1 if worker_idx < remainder else 0)
+        if chunk_size <= 0:
+            break
+        end = start + chunk_size
+        chunks.append(data[start:end])
+        active_workers.append(worker)
+        start = end
+    return chunks, active_workers
+
+
+def _format_rollout_progress(
+    *,
+    global_step: Any,
+    completed_workers: int,
+    total_workers: int,
+    completed_rows: int,
+    total_rows: int,
+    elapsed_s: float,
+    phase: str,
+) -> str:
+    ratio = 1.0 if total_workers <= 0 else max(0.0, min(1.0, completed_workers / total_workers))
+    bar_width = 20
+    filled = int(round(bar_width * ratio))
+    bar = "#" * filled + "-" * (bar_width - filled)
+    return (
+        f"[RolloutProgress] step={global_step} [{bar}] "
+        f"servers={completed_workers}/{total_workers} "
+        f"prompt_rows={completed_rows}/{total_rows} "
+        f"elapsed={elapsed_s:.1f}s phase={phase}"
+    )
+
+
+def _gather_rollout_outputs(
+    workers: list[Any],
+    chunkes: list[DataProto],
+    *,
+    global_step: Any,
+) -> list[Optional[DataProto]]:
+    chunk_refs = []
+    total_rows = 0
+    for worker, chunk in zip(workers, chunkes, strict=True):
+        chunk_rows = _dataproto_num_rows(chunk)
+        total_rows += chunk_rows
+        chunk_refs.append(
+            {
+                "ref": worker.generate_sequences.remote(chunk),
+                "rows": chunk_rows,
+            }
+        )
+
+    total_workers = len(chunk_refs)
+    completed_workers = 0
+    completed_rows = 0
+    start_time = time.time()
+    print(
+        _format_rollout_progress(
+            global_step=global_step,
+            completed_workers=completed_workers,
+            total_workers=total_workers,
+            completed_rows=completed_rows,
+            total_rows=total_rows,
+            elapsed_s=0.0,
+            phase="start",
+        )
+    )
+
+    outputs: list[Optional[DataProto]] = [None] * total_workers
+    remaining_refs = [item["ref"] for item in chunk_refs]
+    ref_to_idx = {item["ref"]: idx for idx, item in enumerate(chunk_refs)}
+
+    while remaining_refs:
+        done_refs, remaining_refs = ray.wait(
+            remaining_refs,
+            num_returns=1,
+            timeout=60,
+        )
+        elapsed_s = time.time() - start_time
+        if not done_refs:
+            print(
+                _format_rollout_progress(
+                    global_step=global_step,
+                    completed_workers=completed_workers,
+                    total_workers=total_workers,
+                    completed_rows=completed_rows,
+                    total_rows=total_rows,
+                    elapsed_s=elapsed_s,
+                    phase="heartbeat",
+                )
+            )
+            continue
+
+        for ref in done_refs:
+            idx = ref_to_idx[ref]
+            outputs[idx] = ray.get(ref)
+            completed_workers += 1
+            completed_rows += chunk_refs[idx]["rows"]
+            print(
+                _format_rollout_progress(
+                    global_step=global_step,
+                    completed_workers=completed_workers,
+                    total_workers=total_workers,
+                    completed_rows=completed_rows,
+                    total_rows=total_rows,
+                    elapsed_s=elapsed_s,
+                    phase="update",
+                )
+            )
+
+    return outputs
+
+
 class AsyncLLMEngineManager:
     """AsyncLLMEngineManager manage a group of vllm instances, i.e AsyncvLLMEngine."""
 
@@ -163,9 +306,9 @@ class AsyncLLMEngineManager:
         """Wake up all vllm instances."""
         ray.get([server.wake_up.remote() for server in self.async_llm_servers])
 
-    def sleep(self):
+    def sleep(self, level: int = 1):
         """Sleep all vllm instances."""
-        ray.get([server.sleep.remote() for server in self.async_llm_servers])
+        ray.get([server.sleep.remote(level=level) for server in self.async_llm_servers])
 
     def generate_sequences(self, prompts: DataProto, **sampling_params) -> DataProto:
         """Generate multiple sequences in parallel via chat scheduler."""
@@ -174,12 +317,13 @@ class AsyncLLMEngineManager:
         if self.config.rollout.free_cache_engine:
             self.wake_up()
 
-        chunkes = prompts.chunk(len(self.async_llm_servers))
-        outputs = ray.get(
-            [
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.async_llm_servers, chunkes, strict=True)
-            ]
+        chunkes, active_workers = _split_dataproto_for_workers(
+            prompts, self.async_llm_servers
+        )
+        outputs = _gather_rollout_outputs(
+            active_workers,
+            chunkes,
+            global_step=prompts.meta_info.get("global_step", "?"),
         )
         # filter out output which is None
         outputs = [output for output in outputs if output is not None]
@@ -238,13 +382,17 @@ class StandaloneVLLMEngineManager:
 
         user = os.environ.get("USER", "user")
         cache_root = f"/tmp/{user}"
-        runtime_env = {
-            "env_vars": {
-                "VERL_VLLM_DISTRIBUTED_BACKEND": "local",
-                "XDG_CACHE_HOME": f"{cache_root}/.cache",
-                "TORCHINDUCTOR_CACHE_DIR": f"{cache_root}/torchinductor",
-            }
+        runtime_env_vars = {
+            "VERL_VLLM_DISTRIBUTED_BACKEND": "local",
+            "XDG_CACHE_HOME": f"{cache_root}/.cache",
+            "TORCHINDUCTOR_CACHE_DIR": f"{cache_root}/torchinductor",
         }
+        # Propagate quant/kernel env vars to EngineCore subprocesses
+        for key in ("KERNELGYM_SKIP_QUANT_PROCESS_WEIGHTS", "VLLM_DISABLED_KERNELS"):
+            val = os.environ.get(key)
+            if val:
+                runtime_env_vars[key] = val
+        runtime_env = {"env_vars": runtime_env_vars}
         self.async_llm_servers = [
             engine_class.options(
                 num_gpus=self.rollout_tp_size,
@@ -272,9 +420,9 @@ class StandaloneVLLMEngineManager:
         """Wake up all vllm instances."""
         ray.get([server.wake_up.remote() for server in self.async_llm_servers])
 
-    def sleep(self):
+    def sleep(self, level: int = 1):
         """Sleep all vllm instances."""
-        ray.get([server.sleep.remote() for server in self.async_llm_servers])
+        ray.get([server.sleep.remote(level=level) for server in self.async_llm_servers])
 
     def generate_sequences(self, prompts: DataProto, **sampling_params) -> DataProto:
         """Generate multiple sequences in parallel via chat scheduler."""
@@ -282,12 +430,13 @@ class StandaloneVLLMEngineManager:
         if self.config.rollout.free_cache_engine:
             self.wake_up()
 
-        chunkes = prompts.chunk(len(self.async_llm_servers))
-        outputs = ray.get(
-            [
-                worker.generate_sequences.remote(chunk)
-                for worker, chunk in zip(self.async_llm_servers, chunkes, strict=True)
-            ]
+        chunkes, active_workers = _split_dataproto_for_workers(
+            prompts, self.async_llm_servers
+        )
+        outputs = _gather_rollout_outputs(
+            active_workers,
+            chunkes,
+            global_step=prompts.meta_info.get("global_step", "?"),
         )
         outputs = [output for output in outputs if output is not None]
         if len(outputs) == 0:

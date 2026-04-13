@@ -48,6 +48,11 @@ from verl.utils.ulysses import (
 from verl.workers.actor import BasePPOActor
 
 from verl_patch.trainer.code.ppo import core_algos
+from verl_patch.utils.cuda_memory_debug import (
+    bf16_oom_debug_enabled,
+    format_cuda_memory_snapshot,
+    format_nvidia_smi_compute_apps_snapshot,
+)
 from verl_patch.utils.metric import PolicyOutput
 from verl_patch.utils.torch_functional import compute_sum_pi_squared_from_logits
 from verl_patch.workers.config.actor import ActorConfig
@@ -58,6 +63,44 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
+def _log_backward_memory_snapshot(
+    stage: str,
+    *,
+    epoch: int,
+    batch_idx: int,
+    micro_batch_idx: int,
+    response_length: int,
+    attention_mask: torch.Tensor,
+    response_mask: torch.Tensor,
+):
+    if not bf16_oom_debug_enabled():
+        return
+
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    input_tokens = int(attention_mask.sum().item())
+    response_tokens = int(response_mask.sum().item())
+    logger.warning(
+        "BF16 OOM debug rank=%s stage=%s epoch=%s batch=%s micro_batch=%s response_len=%s input_tokens=%s "
+        "response_tokens=%s %s",
+        rank,
+        stage,
+        epoch,
+        batch_idx,
+        micro_batch_idx,
+        response_length,
+        input_tokens,
+        response_tokens,
+        format_cuda_memory_snapshot(),
+    )
+    if rank == 0:
+        logger.warning(
+            "BF16 OOM debug rank=%s stage=%s %s",
+            rank,
+            stage,
+            format_nvidia_smi_compute_apps_snapshot(),
+        )
+
+
 class CodeDataParallelPPOActor(BasePPOActor):
 
     def __init__(self, config: ActorConfig, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None):
@@ -65,6 +108,7 @@ class CodeDataParallelPPOActor(BasePPOActor):
         super().__init__(config)
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
+        self._load_optimizer_state_before_step = None
         role = "Ref" if actor_optimizer is None else "Actor"
 
         self.use_remove_padding = self.config.get("use_remove_padding", False)
@@ -362,6 +406,10 @@ class CodeDataParallelPPOActor(BasePPOActor):
             print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
             self.actor_optimizer.zero_grad()
         else:
+            # Keep optimizer state on CPU during the micro-batch loop when offload is enabled.
+            # Load it only for the final optimizer step so backward runs without the Adam-state baseline.
+            if self._load_optimizer_state_before_step is not None:
+                self._load_optimizer_state_before_step()
             self.actor_optimizer.step()
         return grad_norm
 
@@ -522,7 +570,7 @@ class CodeDataParallelPPOActor(BasePPOActor):
 
                 self.actor_optimizer.zero_grad()
 
-                for micro_batch in micro_batches:
+                for micro_batch_idx, micro_batch in enumerate(micro_batches):
                     # Support all hardwares
                     if isinstance(micro_batch, DataProto):
                         data = {**micro_batch.batch.to(torch.cuda.current_device()), **micro_batch.non_tensor_batch}
@@ -534,6 +582,15 @@ class CodeDataParallelPPOActor(BasePPOActor):
                     response_mask = data['response_mask']
                     old_log_prob = data['old_log_probs']
                     advantages = data['advantages']
+                    _log_backward_memory_snapshot(
+                        "after_batch_to_device",
+                        epoch=epoch,
+                        batch_idx=batch_idx,
+                        micro_batch_idx=micro_batch_idx,
+                        response_length=response_length,
+                        attention_mask=attention_mask,
+                        response_mask=response_mask,
+                    )
 
                     # Extract pre-computed rollout importance sampling weights (if present)
                     # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
@@ -558,6 +615,15 @@ class CodeDataParallelPPOActor(BasePPOActor):
                     # all return: (bsz, response_length)
                     entropy, log_prob, _ = self._forward_micro_batch(
                         micro_batch=data, temperature=temperature, calculate_entropy=True
+                    )
+                    _log_backward_memory_snapshot(
+                        "after_forward",
+                        epoch=epoch,
+                        batch_idx=batch_idx,
+                        micro_batch_idx=micro_batch_idx,
+                        response_length=response_length,
+                        attention_mask=attention_mask,
+                        response_mask=response_mask,
                     )
 
                     # Choose loss computation based on mode
@@ -658,7 +724,37 @@ class CodeDataParallelPPOActor(BasePPOActor):
                         loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
                     else:
                         loss = policy_loss / self.gradient_accumulation
-                    loss.backward()
+                    _log_backward_memory_snapshot(
+                        "before_backward",
+                        epoch=epoch,
+                        batch_idx=batch_idx,
+                        micro_batch_idx=micro_batch_idx,
+                        response_length=response_length,
+                        attention_mask=attention_mask,
+                        response_mask=response_mask,
+                    )
+                    try:
+                        loss.backward()
+                    except torch.OutOfMemoryError:
+                        _log_backward_memory_snapshot(
+                            "backward_oom",
+                            epoch=epoch,
+                            batch_idx=batch_idx,
+                            micro_batch_idx=micro_batch_idx,
+                            response_length=response_length,
+                            attention_mask=attention_mask,
+                            response_mask=response_mask,
+                        )
+                        raise
+                    _log_backward_memory_snapshot(
+                        "after_backward",
+                        epoch=epoch,
+                        batch_idx=batch_idx,
+                        micro_batch_idx=micro_batch_idx,
+                        response_length=response_length,
+                        attention_mask=attention_mask,
+                        response_mask=response_mask,
+                    )
 
                     # Collect all actor metrics using unified system
                     actor_metrics = policy_output.to_scalars(prefix='actor/')

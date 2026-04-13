@@ -52,6 +52,9 @@ from kernel.event_logging import (
     format_turn_model_summary,
 )
 from kernel.workers.agent import BaseAgent, KernelAgent
+from kernel.workers.rollout.vllm_rollout.vllm_async_engine import (
+    _resolve_prompt_config_path as shared_resolve_prompt_config_path,
+)
 from verl_patch.workers.code.agent_env import (
     BaseEnv,
     FinishReasonTypeEnum,
@@ -1347,6 +1350,7 @@ class MultiIterAsyncvLLMEngine:
             return None
 
         # Load from configured path
+        prompt_config_path = shared_resolve_prompt_config_path(prompt_config_path)
         with open(prompt_config_path, encoding='utf-8') as fp:
             prompt_cfg = OmegaConf.create(fp.read())
 

@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import contextmanager
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
@@ -51,6 +52,13 @@ from kernel.event_logging import (
     format_turn_model_summary,
 )
 from kernel.workers.agent import BaseAgent, KernelAgent
+from kernel.workers.rollout.vllm_rollout.online_quant_utils import (
+    maybe_apply_online_quantization_engine_kwargs,
+)
+from verl_patch.utils.cuda_memory_debug import (
+    bf16_oom_debug_enabled,
+    format_cuda_memory_snapshot,
+)
 from verl_patch.workers.code.agent_env import (
     BaseEnv,
     FinishReasonTypeEnum,
@@ -87,6 +95,105 @@ def create_agent(agent_type: str, tokenizer) -> BaseAgent:
 
 from collections import defaultdict
 import re
+
+logger = logging.getLogger(__name__)
+
+_DRKERNEL_ROOT = Path(__file__).resolve().parents[4]
+_KERNEL_ROOT = _DRKERNEL_ROOT / "kernel"
+
+
+def _resolve_rollout_model_path(config: DictConfig) -> str:
+    return config.rollout.get("model_path", None) or config.model.path
+
+
+def _resolve_rollout_tokenizer_path(config: DictConfig, rollout_model_path: str) -> str:
+    return config.rollout.get("tokenizer_path", None) or config.model.get("tokenizer_path", None) or rollout_model_path
+
+
+def _resolve_prompt_config_path(prompt_config_path: str) -> str:
+    resolved_path = Path(prompt_config_path).expanduser()
+    if resolved_path.is_absolute():
+        return str(resolved_path)
+
+    for base_dir in (Path.cwd(), _DRKERNEL_ROOT, _KERNEL_ROOT):
+        candidate = (base_dir / resolved_path).resolve()
+        if candidate.exists():
+            return str(candidate)
+
+    return str((_DRKERNEL_ROOT / resolved_path).resolve())
+
+
+def _resolve_vllm_engine_kwargs(rollout_config: DictConfig) -> Dict[str, Any]:
+    engine_kwargs = rollout_config.get("engine_kwargs", {}) or {}
+    if isinstance(engine_kwargs, DictConfig):
+        engine_kwargs = OmegaConf.to_container(engine_kwargs, resolve=True)
+    engine_kwargs = (engine_kwargs or {}).get("vllm", {}) or {}
+    engine_kwargs = {key: value for key, value in engine_kwargs.items() if value is not None}
+    return maybe_apply_online_quantization_engine_kwargs(rollout_config, engine_kwargs)
+
+
+def _build_async_engine_args_kwargs(
+    *,
+    config: DictConfig,
+    local_model_path: str,
+    tokenizer_path: str,
+    override_generation_config: Dict[str, Any],
+    tensor_parallel_size: int,
+    distributed_executor_backend: Any,
+    max_model_len: int,
+    max_num_batched_tokens: int,
+    trust_remote_code: bool,
+) -> Dict[str, Any]:
+    rollout_config = config.rollout
+    engine_init_kwargs: Dict[str, Any] = dict(
+        model=local_model_path,
+        tokenizer=tokenizer_path,
+        enable_sleep_mode=True,
+        override_generation_config=override_generation_config,
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=distributed_executor_backend,
+        dtype=rollout_config.dtype,
+        enforce_eager=rollout_config.enforce_eager,
+        gpu_memory_utilization=rollout_config.gpu_memory_utilization,
+        disable_custom_all_reduce=True,
+        skip_tokenizer_init=False,
+        max_model_len=max_model_len,
+        load_format="auto",
+        disable_log_stats=False,
+        max_num_batched_tokens=max_num_batched_tokens,
+        enable_chunked_prefill=rollout_config.enable_chunked_prefill,
+        enable_prefix_caching=True,
+        trust_remote_code=trust_remote_code,
+        seed=rollout_config.get("seed", 0),
+    )
+    engine_init_kwargs.update(_resolve_vllm_engine_kwargs(rollout_config))
+    engine_init_kwargs["model"] = local_model_path
+    engine_init_kwargs["tokenizer"] = tokenizer_path
+    return engine_init_kwargs
+
+
+def _format_online_quant_debug(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    hf_overrides = dict(engine_kwargs.get("hf_overrides") or {})
+    compression_config = hf_overrides.get("compression_config")
+    return {
+        "quantization": engine_kwargs.get("quantization"),
+        "load_format": engine_kwargs.get("load_format"),
+        "dtype": engine_kwargs.get("dtype"),
+        "gpu_memory_utilization": engine_kwargs.get("gpu_memory_utilization"),
+        "enforce_eager": engine_kwargs.get("enforce_eager"),
+        "compression_config": compression_config,
+    }
+
+
+def _verbose_vllm_debug_logging_enabled() -> bool:
+    flag = os.environ.get("KERNELGYM_VLLM_ENABLE_VERBOSE_INIT_LOGS", "")
+    return flag.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _log_engine_cuda_memory(stage: str):
+    if not bf16_oom_debug_enabled():
+        return
+    logger.warning("BF16 OOM debug pid=%s stage=%s %s", os.getpid(), stage, format_cuda_memory_snapshot())
 
 
 @ray.remote
@@ -218,6 +325,7 @@ class ExternalRayDistributedExecutor(Executor):
         timeout: Optional[float] = None,
         args: Tuple = (),
         kwargs: Optional[Dict[str, Any]] = None,
+        non_block: bool = False,
     ) -> List[Any]:
         # TODO(wuxibin): support ray compiled graph
         if isinstance(method, str):
@@ -227,9 +335,16 @@ class ExternalRayDistributedExecutor(Executor):
 
         del method
 
-        outputs = ray.get(
-            [worker.execute_method.remote(sent_method, *args, **(kwargs or {})) for worker in self.workers]
-        )
+        ray_worker_outputs = [
+            worker.execute_method.remote(sent_method, *args, **(kwargs or {}))
+            for worker in self.workers
+        ]
+        if non_block:
+            from vllm.v1.executor.ray_utils import FutureWrapper
+
+            return [FutureWrapper(worker_output) for worker_output in ray_worker_outputs]
+
+        outputs = ray.get(ray_worker_outputs, timeout=timeout)
         return outputs
 
     def check_health(self):
@@ -378,6 +493,7 @@ class ExternalRayDistributedExecutor(Executor):
         timeout: Optional[float] = None,
         args: Tuple = (),
         kwargs: Optional[Dict[str, Any]] = None,
+        non_block: bool = False,
     ) -> List[Any]:
         # TODO(wuxibin): support ray compiled graph
         if isinstance(method, str):
@@ -387,9 +503,16 @@ class ExternalRayDistributedExecutor(Executor):
 
         del method
 
-        outputs = ray.get(
-            [worker.execute_method.remote(sent_method, *args, **(kwargs or {})) for worker in self.workers]
-        )
+        ray_worker_outputs = [
+            worker.execute_method.remote(sent_method, *args, **(kwargs or {}))
+            for worker in self.workers
+        ]
+        if non_block:
+            from vllm.v1.executor.ray_utils import FutureWrapper
+
+            return [FutureWrapper(worker_output) for worker_output in ray_worker_outputs]
+
+        outputs = ray.get(ray_worker_outputs, timeout=timeout)
         return outputs
 
     def check_health(self):
@@ -503,10 +626,11 @@ class AsyncvLLMEngine:
     def init_engine(self):
         """Init vLLM AsyncLLM engine."""
         config = self.config
-        model_path = config.model.path
+        model_path = _resolve_rollout_model_path(config)
         model_name = "/".join(model_path.split("/")[-2:])
         local_path = copy_to_local(model_path)
         trust_remote_code = config.model.get("trust_remote_code", False)
+        tokenizer_path = _resolve_rollout_tokenizer_path(config, model_path)
         config = config.rollout
 
         tensor_parallel_size = config.get("tensor_model_parallel_size", 1)
@@ -528,7 +652,8 @@ class AsyncvLLMEngine:
                 elif isinstance(value, DictConfig):
                     value = OmegaConf.to_container(value, resolve=True)  # need import OmegaConf
                 kwargs[k] = value
-        print(f"override_generation_config: {kwargs}")
+        if _verbose_vllm_debug_logging_enabled():
+            print(f"override_generation_config: {kwargs}")
 
         self.sampling_params = SamplingParams(**kwargs)
 
@@ -540,29 +665,23 @@ class AsyncvLLMEngine:
         else:
             distributed_executor_backend = None
 
-        engine_args = AsyncEngineArgs(
-            model=local_path,
-            enable_sleep_mode=True,
+        engine_init_kwargs = _build_async_engine_args_kwargs(
+            config=self.config,
+            local_model_path=local_path,
+            tokenizer_path=tokenizer_path,
             override_generation_config=kwargs,
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend=distributed_executor_backend,
-            dtype=config.dtype,
-            enforce_eager=config.enforce_eager,
-            gpu_memory_utilization=config.gpu_memory_utilization,
-            disable_custom_all_reduce=True,
-            # Qian: this is a known issue of verl, see PR: https://github.com/volcengine/verl/pull/2068/files
-            # disable_mm_preprocessor_cache=False,
-            skip_tokenizer_init=False,
             max_model_len=max_model_len,
-            load_format="auto",
-            # disable_log_stats=config.disable_log_stats,
-            disable_log_stats=False,
             max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=config.enable_chunked_prefill,
-            enable_prefix_caching=True,
             trust_remote_code=trust_remote_code,
-            seed=config.get("seed", 0),
         )
+        engine_args = AsyncEngineArgs(**engine_init_kwargs)
+        if _verbose_vllm_debug_logging_enabled():
+            print(
+                "vLLM online quantization runtime config:",
+                _format_online_quant_debug(engine_init_kwargs),
+            )
 
         # init async llm engine
         vllm_config = self._create_engine_config(engine_args)
@@ -577,7 +696,8 @@ class AsyncvLLMEngine:
         if engine_args.distributed_executor_backend == ExternalZeroMQDistributedExecutor:
             workers = _get_model_runner_workers(vllm_config=vllm_config, init_ray=False)
             zmq_addresses = ray.get([worker.get_zeromq_address.remote() for worker in workers])
-            print(f"VERL_VLLM_ZMQ_ADDRESSES: {zmq_addresses}")
+            if _verbose_vllm_debug_logging_enabled():
+                print(f"VERL_VLLM_ZMQ_ADDRESSES: {zmq_addresses}")
             os.environ["VERL_VLLM_ZMQ_ADDRESSES"] = ",".join(zmq_addresses)
 
         return vllm_config
@@ -905,6 +1025,8 @@ class MultiTurnRequest(BaseModel):
     # Configuration for masking void turns
     mask_void_turn: bool = True
     # Extra information from dataset
+    history_messages: list[dict[str, str]] = None
+    # store all history messages. Some of them might have been removed from messages
     extra_info: dict = Field(default_factory=dict)
     # Ground truth from dataset
     ground_truth: str = None
@@ -912,6 +1034,10 @@ class MultiTurnRequest(BaseModel):
     entry_point: str = None
     # Unique request id for this multi-turn request
     uuid: str = None
+    # Multi-iteration support
+    iteration_idx: int = 0
+    global_turn_offset: int = 0
+    preserved_turn_indices: List[int] = Field(default_factory=list)
 
     def add_message(self, message: str, is_tool_call: bool = False, response_token_ids: List[int] = None):
         """Add a message to the conversation history."""
@@ -928,6 +1054,19 @@ class MultiTurnRequest(BaseModel):
 
         # Add message after storing the index
         self.messages.append({"role": role, "content": message})
+
+    def _replace_message(self, turn_idx: int, messages: list[dict[str, str]]):
+        """
+        Replace a complete-turn message in the conversation history.
+        It should be assistant message and its follow-up user-turn feedback.
+        [Warning] It is an in-place operation
+        """
+        assert len(messages) == 2, "messages should be assistant message and its follow-up user-turn feedback"
+        assert messages[0]["role"] == "assistant", "messages[0] should be assistant message"
+        assert messages[1]["role"] == "user", "messages[1] should be user message"
+
+        turn_start_offset = 1 + turn_idx * 2
+        self.messages[turn_start_offset : turn_start_offset + 2] = messages
 
     def get_num_turns(self):
         return len(self.response_turns)
@@ -990,6 +1129,8 @@ class MultiTurnOutput(BaseModel):
     multi_logprobs: list[list[float]]
     multi_loss_mask: list[int]  # Per-turn loss mask from finalization
     multi_rewards: list[float] = None
+    # Global turn indices (chronological across iterations), if available
+    multi_global_turn_indices: list[int] = None
 
     # Multi-turn statistics
     stats: MultiTurnStats
@@ -1101,6 +1242,7 @@ class MultiTurnAsyncvLLMEngine:
             return None
 
         # Load from configured path
+        prompt_config_path = _resolve_prompt_config_path(prompt_config_path)
         with open(prompt_config_path, encoding='utf-8') as fp:
             prompt_cfg = OmegaConf.create(fp.read())
 
@@ -1327,10 +1469,11 @@ class MultiTurnAsyncvLLMEngine:
         """Initialize vLLM engine and agent components."""
         # Initialize vLLM AsyncLLM engine - replicating AsyncvLLMEngine init_engine method
         config = self.config
-        model_path = config.model.path
+        model_path = _resolve_rollout_model_path(config)
         model_name = "/".join(model_path.split("/")[-2:])
         local_path = copy_to_local(model_path)
         trust_remote_code = config.model.get("trust_remote_code", False)
+        tokenizer_path = _resolve_rollout_tokenizer_path(config, model_path)
         config = config.rollout
 
         tensor_parallel_size = config.get("tensor_model_parallel_size", 1)
@@ -1353,7 +1496,8 @@ class MultiTurnAsyncvLLMEngine:
                 elif isinstance(value, DictConfig):
                     value = OmegaConf.to_container(value, resolve=True)
                 kwargs[k] = value
-        print(f"override_generation_config: {kwargs}")
+        if _verbose_vllm_debug_logging_enabled():
+            print(f"override_generation_config: {kwargs}")
 
         self.sampling_params = SamplingParams(**kwargs)
 
@@ -1366,27 +1510,17 @@ class MultiTurnAsyncvLLMEngine:
             distributed_executor_backend = None
 
         engine_args = AsyncEngineArgs(
-            model=local_path,
-            enable_sleep_mode=True,
-            override_generation_config=kwargs,
-            tensor_parallel_size=tensor_parallel_size,
-            distributed_executor_backend=distributed_executor_backend,
-            dtype=config.dtype,
-            enforce_eager=config.enforce_eager,
-            gpu_memory_utilization=config.gpu_memory_utilization,
-            disable_custom_all_reduce=True,
-            # Qian: this is a known issue of verl, see PR: https://github.com/volcengine/verl/pull/2068/files
-            # disable_mm_preprocessor_cache=False,
-            skip_tokenizer_init=False,
-            max_model_len=max_model_len,
-            load_format="auto",
-            # disable_log_stats=config.disable_log_stats,
-            disable_log_stats=False,
-            max_num_batched_tokens=max_num_batched_tokens,
-            enable_chunked_prefill=config.enable_chunked_prefill,
-            enable_prefix_caching=True,
-            trust_remote_code=trust_remote_code,
-            seed=config.get("seed", 0),
+            **_build_async_engine_args_kwargs(
+                config=self.config,
+                local_model_path=local_path,
+                tokenizer_path=tokenizer_path,
+                override_generation_config=kwargs,
+                tensor_parallel_size=tensor_parallel_size,
+                distributed_executor_backend=distributed_executor_backend,
+                max_model_len=max_model_len,
+                max_num_batched_tokens=max_num_batched_tokens,
+                trust_remote_code=trust_remote_code,
+            )
         )
 
         # init async llm engine
@@ -1411,7 +1545,8 @@ class MultiTurnAsyncvLLMEngine:
         if engine_args.distributed_executor_backend == ExternalZeroMQDistributedExecutor:
             workers = _get_model_runner_workers(vllm_config=vllm_config, init_ray=False)
             zmq_addresses = ray.get([worker.get_zeromq_address.remote() for worker in workers])
-            print(f"VERL_VLLM_ZMQ_ADDRESSES: {zmq_addresses}")
+            if _verbose_vllm_debug_logging_enabled():
+                print(f"VERL_VLLM_ZMQ_ADDRESSES: {zmq_addresses}")
             os.environ["VERL_VLLM_ZMQ_ADDRESSES"] = ",".join(zmq_addresses)
 
         return vllm_config
@@ -1456,15 +1591,20 @@ class MultiTurnAsyncvLLMEngine:
 
     async def wake_up(self):
         """Wake up the engine from sleep mode."""
+        _log_engine_cuda_memory("before_wake_up")
         await self.engine.wake_up()
+        _log_engine_cuda_memory("after_wake_up")
         if not hasattr(self, "_watchdog_task") or self._watchdog_task is None or self._watchdog_task.done():
             self._watchdog_task = asyncio.create_task(self._deadline_watchdog())
 
-    async def sleep(self):
+    async def sleep(self, level: int = 1):
         """Put the engine into sleep mode."""
+        _log_engine_cuda_memory(f"before_sleep_level_{level}")
         # TODO: https://github.com/vllm-project/vllm/issues/17103
         await self.engine.reset_prefix_cache()
-        await self.engine.sleep()
+        _log_engine_cuda_memory(f"after_reset_prefix_cache_level_{level}")
+        await self.engine.sleep(level=level)
+        _log_engine_cuda_memory(f"after_sleep_level_{level}")
         if getattr(self, "_watchdog_task", None):
             self._watchdog_task.cancel()
             self._watchdog_task = None
@@ -1988,6 +2128,9 @@ class MultiTurnAsyncvLLMEngine:
                     turn_index=req.get_num_turns(),
                     model_response=model_response,
                     tool_response=tool_response,
+                    prompt_token_ids=prompt_token_ids,
+                    model_response_token_ids=model_response_token_ids,
+                    model_logprobs=model_logprobs,
                     prefill_tokens=len(prompt_token_ids),
                     decode_tokens=len(model_response_token_ids),
                     model_time_s=model_time,
@@ -2201,13 +2344,16 @@ class MultiTurnAsyncvLLMEngine:
         global_step = prompts.meta_info.get("global_step", 0)  # Extract global_step for logfire
         tgt_device = prompts.batch["input_ids"].device
 
-        # Support multiple sampling for both training and validation
+        # Support per-batch rollout multiplicity so trainer-side sample oversampling
+        # can expand training candidates without mutating the global rollout config.
         if is_validate:
-            # For validation, use a separate config for number of samples
-            val_n_samples = self.config.rollout.get("val_n_samples", 1)
-            prompts = prompts.repeat(repeat_times=val_n_samples, interleave=True)
+            repeat_times = prompts.meta_info.get(
+                "n",
+                self.config.rollout.get("val_n_samples", 1),
+            )
         else:
-            prompts = prompts.repeat(repeat_times=self.config.rollout.n, interleave=True)
+            repeat_times = prompts.meta_info.get("n", self.config.rollout.n)
+        prompts = prompts.repeat(repeat_times=int(repeat_times), interleave=True)
 
         config = self.config.rollout
         sampling_params = dict(

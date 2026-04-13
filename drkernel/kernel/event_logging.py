@@ -29,6 +29,11 @@ def _event_log_path(event_type: str) -> Path:
     return _event_log_dir() / f"{safe_type}.pid{os.getpid()}.jsonl"
 
 
+def _event_blob_dir(event_type: str) -> Path:
+    safe_type = event_type.replace("/", "_")
+    return _event_log_dir() / f"{safe_type}.pid{os.getpid()}.blobs"
+
+
 def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -89,6 +94,39 @@ def _truncate_text(text: Any, limit: int = 400) -> Any:
 
 
 CODE_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<code>.*?)```", re.DOTALL)
+
+
+def _safe_blob_component(value: str | None, default: str) -> str:
+    text = (value or "").strip() or default
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", text)
+
+
+def _persist_generated_code_debug_blob(
+    *,
+    request_id: str,
+    turn_index: int,
+    prompt_token_ids: list[int] | None,
+    model_response_token_ids: list[int] | None,
+    model_logprobs: list[float] | None,
+) -> str | None:
+    prompt_ids = list(prompt_token_ids or [])
+    token_ids = list(model_response_token_ids or [])
+    token_logprobs = [float(v) for v in (model_logprobs or [])]
+    if not prompt_ids and not token_ids and not token_logprobs:
+        return None
+
+    blob_dir = _event_blob_dir("generated_code")
+    blob_dir.mkdir(parents=True, exist_ok=True)
+    request_part = _safe_blob_component(request_id, "request")
+    filename = f"{request_part}.turn{int(turn_index):02d}.npz"
+    blob_path = blob_dir / filename
+    np.savez_compressed(
+        blob_path,
+        prompt_token_ids=np.asarray(prompt_ids, dtype=np.int32),
+        model_response_token_ids=np.asarray(token_ids, dtype=np.int32),
+        model_logprobs=np.asarray(token_logprobs, dtype=np.float32),
+    )
+    return os.path.relpath(blob_path, _event_log_dir())
 
 
 def append_jsonl_event(event_type: str, payload: Dict[str, Any]) -> None:
@@ -266,6 +304,9 @@ def build_generated_code_record(
     turn_index: int,
     model_response: str,
     tool_response: str | None,
+    prompt_token_ids: list[int] | None = None,
+    model_response_token_ids: list[int] | None = None,
+    model_logprobs: list[float] | None = None,
     prefill_tokens: int,
     decode_tokens: int,
     model_time_s: float,
@@ -276,6 +317,19 @@ def build_generated_code_record(
     entry_point: str | None = None,
 ) -> Dict[str, Any]:
     code_blocks = extract_code_blocks(model_response)
+    prompt_count = len(prompt_token_ids or [])
+    token_count = len(model_response_token_ids or [])
+    logprob_count = len(model_logprobs or [])
+    blob_relpath = _persist_generated_code_debug_blob(
+        request_id=request_id,
+        turn_index=turn_index,
+        prompt_token_ids=prompt_token_ids,
+        model_response_token_ids=model_response_token_ids,
+        model_logprobs=model_logprobs,
+    )
+    token_logprobs = [float(v) for v in (model_logprobs or [])]
+    token_logprob_sum = float(sum(token_logprobs)) if token_logprobs else None
+    token_logprob_mean = float(token_logprob_sum / len(token_logprobs)) if token_logprobs else None
     return {
         "request_id": request_id,
         "sample_uuid": sample_uuid,
@@ -289,6 +343,12 @@ def build_generated_code_record(
         "global_step": int(global_step),
         "model_response": model_response,
         "tool_response": tool_response,
+        "model_trace_blob": blob_relpath,
+        "prompt_token_count": prompt_count,
+        "model_response_token_count": token_count,
+        "model_logprob_count": logprob_count,
+        "model_logprob_sum": token_logprob_sum,
+        "model_logprob_mean": token_logprob_mean,
         "code_block_count": len(code_blocks),
         "code_blocks": code_blocks,
     }

@@ -1858,6 +1858,15 @@ class RayKernelTrainer(RayPPOTrainer):
                 reward_fn=self.reward_fn,
                 val_reward_fn=self.val_reward_fn,
             )
+            # When no rollout quantization is applied, async engines hold full
+            # bf16 weights (~28GB).  Use aggressive sleep (level 2) to offload
+            # them to CPU during training backward so FSDP has enough headroom.
+            # With quantization the int8 weights are small enough to stay on GPU.
+            _quant_preset = getattr(
+                self.config.actor_rollout_ref.rollout,
+                "online_quantization_preset", None,
+            )
+            self._async_sleep_level = 1 if _quant_preset else 2
 
         # IMPORTANT: This happens ONLY for sufficient batches (after buffering)
         # We find the maximum world_size across all worker groups to ensure compatibility
@@ -2213,7 +2222,7 @@ class RayKernelTrainer(RayPPOTrainer):
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(
                     test_gen_batch_padded
                 )
-                self.async_rollout_manager.sleep()
+                self.async_rollout_manager.sleep(level=self._async_sleep_level)
 
             test_output_gen_batch = unpad_dataproto(
                 test_output_gen_batch_padded, pad_size=pad_size
@@ -2889,7 +2898,7 @@ class RayKernelTrainer(RayPPOTrainer):
                             gen_batch_output = self.async_rollout_manager.generate_sequences(
                                 gen_batch
                             )
-                            self.async_rollout_manager.sleep()
+                            self.async_rollout_manager.sleep(level=self._async_sleep_level)
 
                     # check on if generation is empty due to filtering in async mode
                     if gen_batch_output is None or len(gen_batch_output.batch) == 0:

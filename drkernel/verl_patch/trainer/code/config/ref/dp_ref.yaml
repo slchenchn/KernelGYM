@@ -24,6 +24,10 @@ fsdp_config:
     # minimum number of params in a wrapped module
     min_num_params: 0
 
+  # FSDP group size. -1 means use all available GPUs (FULL_SHARD).
+  # Set to N for HYBRID_SHARD with N GPUs per shard group.
+  fsdp_size: -1
+
   # whether to offload parameters in FSDP
   param_offload: False
 

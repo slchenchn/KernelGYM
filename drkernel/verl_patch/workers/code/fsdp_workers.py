@@ -122,6 +122,11 @@ def get_sharding_strategy(device_mesh):
     return sharding_strategy
 
 
+def _resolve_attn_implementation(model_config: DictConfig | HFModelConfig | dict[str, Any]) -> str:
+    override_config = model_config.get("override_config", {}) or {}
+    return override_config.get("attn_implementation", "flash_attention_2")
+
+
 class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     """
     This worker can be instantiated as a standalone actor or a standalone rollout or a standalone reference policy
@@ -135,6 +140,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         import torch.distributed
 
         if not torch.distributed.is_initialized():
+            # For multi-node Gloo: auto-detect the correct network interface if not already set.
+            # Gloo falls back to loopback (127.0.0.1) if it cannot resolve the hostname,
+            # which breaks cross-node communication.
+            # For multi-node: auto-detect the correct network interface for both
+            # Gloo and NCCL if not already set. Both fall back to loopback (127.0.0.1)
+            # if they cannot resolve the hostname, breaking cross-node communication.
+            for ifname_env in ("GLOO_SOCKET_IFNAME", "NCCL_SOCKET_IFNAME"):
+                if not os.environ.get(ifname_env):
+                    import subprocess
+                    try:
+                        result = subprocess.run(
+                            ["ip", "-4", "route", "get", "1"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        parts = result.stdout.split()
+                        if "dev" in parts:
+                            ifname = parts[parts.index("dev") + 1]
+                            os.environ[ifname_env] = ifname
+                    except Exception:
+                        pass
+
             rank = int(os.environ.get("RANK", 0))
             world_size = int(os.environ.get("WORLD_SIZE", 1))
             torch.distributed.init_process_group(
@@ -311,8 +337,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
+        attn_implementation = _resolve_attn_implementation(self.config.model)
         actor_model_config = AutoConfig.from_pretrained(
-            local_path, trust_remote_code=trust_remote_code, attn_implementation="flash_attention_2"
+            local_path, trust_remote_code=trust_remote_code, attn_implementation=attn_implementation
         )
         # TODO: VL models use VisionAttention, which directly uses flash_attention in transformers>=4.53
         # which will be patched by _ulysses_flash_attention_forward, but errorly misses position_ids
@@ -376,6 +403,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 pretrained_model_name_or_path=local_path,
                 torch_dtype=torch_dtype,
                 config=actor_model_config,
+                attn_implementation=attn_implementation,
                 trust_remote_code=trust_remote_code,
             )
 
@@ -404,7 +432,44 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             actor_module.to(torch_dtype)
 
             if enable_gradient_checkpointing:
-                actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                gc_interval = int(os.environ.get("GRADIENT_CHECKPOINT_INTERVAL", "1"))
+                if gc_interval <= 1:
+                    # Default: checkpoint every layer
+                    actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+                else:
+                    # Selective: checkpoint every Nth layer
+                    from torch.utils.checkpoint import checkpoint
+                    import functools
+
+                    layer_attr = None
+                    for attr in ["model.layers", "transformer.h", "gpt_neox.layers"]:
+                        parts = attr.split(".")
+                        obj = actor_module
+                        try:
+                            for p in parts:
+                                obj = getattr(obj, p)
+                            layer_attr = attr
+                            layers = obj
+                            break
+                        except AttributeError:
+                            continue
+
+                    if layer_attr is not None:
+                        n_layers = len(layers)
+                        n_checkpointed = 0
+                        for i, layer in enumerate(layers):
+                            if i % gc_interval == 0:
+                                original_forward = layer.forward
+                                layer._original_forward = original_forward
+                                layer.forward = functools.partial(
+                                    lambda mod, orig_fn, *args, **kwargs: checkpoint(orig_fn, *args, use_reentrant=False, **kwargs),
+                                    layer, original_forward,
+                                )
+                                n_checkpointed += 1
+                        print(f"Selective gradient checkpointing: {n_checkpointed}/{n_layers} layers (every {gc_interval})")
+                    else:
+                        print("WARNING: Could not find transformer layers for selective checkpointing, falling back to full")
+                        actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
             if self._is_lora:
                 print("Applying LoRA to actor module")
                 actor_module.enable_input_require_grads()
@@ -693,6 +758,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor = DataParallelPPOActor(
                 config=actor_cfg, actor_module=self.actor_module_fsdp, actor_optimizer=self.actor_optimizer
             )
+            if self._is_offload_optimizer and self.actor_optimizer is not None:
+                self.actor._load_optimizer_state_before_step = (
+                    lambda: load_fsdp_optimizer(
+                        optimizer=self.actor_optimizer, device_id=torch.cuda.current_device()
+                    )
+                )
 
             # Log if sum_pi_squared computation is enabled
             if hasattr(self.config.actor, 'compute_sum_pi_squared') and self.config.actor.compute_sum_pi_squared:
@@ -758,8 +829,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
-        if self._is_offload_optimizer:
-            load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
 
         log_gpu_memory_usage('Before update policy', logger=logger)
 
@@ -1120,7 +1189,7 @@ class CriticWorker(Worker):
                 pretrained_model_name_or_path=local_path,
                 torch_dtype=torch_dtype,
                 config=critic_model_config,
-                attn_implementation='flash_attention_2',
+                attn_implementation=_resolve_attn_implementation(config.model),
                 trust_remote_code=trust_remote_code,
             )
 
@@ -1397,7 +1466,7 @@ class RewardModelWorker(Worker):
                 pretrained_model_name_or_path=local_path,
                 config=model_config,
                 torch_dtype=torch.bfloat16,
-                attn_implementation='flash_attention_2',
+                attn_implementation=_resolve_attn_implementation(config.model),
                 trust_remote_code=trust_remote_code,
             )
 

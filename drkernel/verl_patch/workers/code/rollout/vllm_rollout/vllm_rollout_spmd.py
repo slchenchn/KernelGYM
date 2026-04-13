@@ -52,6 +52,21 @@ from verl_patch.workers.code.rollout.vllm_rollout.vllm_config_helper import (
 )
 from verl_patch.workers.code.rollout.vllm_rollout.vllm_compat import WorkerWrapperBase, build_worker_wrapper
 
+
+def _sync_diag_enabled() -> bool:
+    return os.getenv("DRKERNEL_SYNC_DIAG", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sync_diag_print(message: str) -> None:
+    if not _sync_diag_enabled():
+        return
+    print(
+        "[ACTOR_VLLM_SYNC_DIAG] "
+        f"component=verl_patch_vllm_async_rollout pid={os.getpid()} rank={os.getenv('RANK', '?')} "
+        f"local_rank={os.getenv('LOCAL_RANK', os.getenv('RAY_LOCAL_RANK', '?'))} {message}",
+        flush=True,
+    )
+
 # TODO
 # 1. support pp in vllm
 # 2. passing tokenizer is not necessary? no encoding/decoding is happending here
@@ -134,6 +149,13 @@ class vLLMRollout(BaseRollout):
 
         # Get additional kwargs for correct logprobs handling
         vllm_kwargs = get_vllm_config_kwargs(config)
+
+        # Apply online quantization engine kwargs if configured
+        from kernel.workers.rollout.vllm_rollout.online_quant_utils import (
+            maybe_apply_online_quantization_engine_kwargs,
+        )
+        online_quant_kwargs = maybe_apply_online_quantization_engine_kwargs(config, {})
+        vllm_kwargs.update(online_quant_kwargs)
 
         # Initialize with all parameters
         self.inference_engine = LLM(
@@ -488,17 +510,24 @@ class vLLMAsyncRollout:
 
     def sleep(self, *args, **kwargs):
         """Offload model weights and discard kv cache."""
+        _sync_diag_print(f"sleep_enter is_sleep={self.is_sleep} has_sharding_manager={self.sharding_manager is not None}")
         if self.is_sleep:
+            _sync_diag_print("sleep_skip reason=already_sleep")
             return
         self.sharding_manager.__exit__(None, None, None)
         self.is_sleep = True
+        _sync_diag_print(f"sleep_done is_sleep={self.is_sleep}")
 
     def wake_up(self, *args, **kwargs):
         """Load model weights and build kv cache."""
+        _sync_diag_print(f"wake_up_enter is_sleep={self.is_sleep} has_sharding_manager={self.sharding_manager is not None}")
         if not self.is_sleep:
+            _sync_diag_print("wake_up_skip reason=already_awake")
             return
+        _sync_diag_print("sharding_enter_call")
         self.sharding_manager.__enter__()  # pylint: disable=C2801
         self.is_sleep = False
+        _sync_diag_print(f"wake_up_done is_sleep={self.is_sleep}")
 
     def execute_method(self, method: Union[str, bytes], *args, **kwargs):
         if method == "init_worker":

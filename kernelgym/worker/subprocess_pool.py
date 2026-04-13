@@ -14,6 +14,7 @@ Version: v0.3.3-rc
 """
 
 import os
+import signal
 import sys
 import time
 import logging
@@ -21,6 +22,7 @@ import traceback
 import multiprocessing as mp
 import queue
 import asyncio
+import threading
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 from datetime import datetime
@@ -249,32 +251,70 @@ class PersistentWorker:
         )
 
     def shutdown(self, timeout: int = 10):
-        """关闭 worker 进程"""
+        """关闭 worker 进程
+
+        Ensures the child process is fully reaped (joined) so that the
+        CUDA driver releases its GPU memory.  Every kill path is followed
+        by ``process.join()`` and ``process.close()``.
+        """
         logger.info(f"[{self.worker_id}] Shutting down worker...")
 
         try:
-            # 发送 shutdown 信号
-            self.task_queue.put({"command": "SHUTDOWN"}, timeout=2)
+            # Send graceful shutdown sentinel -- worker will run GPU
+            # cleanup and exit on its own.
+            self.task_queue.put({"command": "GRACEFUL_SHUTDOWN"}, timeout=2)
+        except Exception:
+            # Queue full / broken -- fall through to SHUTDOWN then kill.
+            pass
 
-            # 等待进程结束
-            if self.process and self.process.is_alive():
+        try:
+            # Fallback: legacy SHUTDOWN command (immediate exit).
+            try:
+                self.task_queue.put({"command": "SHUTDOWN"}, timeout=1)
+            except Exception:
+                pass
+
+            # Always join to reap zombie and release CUDA context,
+            # even if process already exited (is_alive() == False).
+            if self.process:
                 self.process.join(timeout=timeout)
 
-                # 如果还没结束，强制终止
+                # Escalate: SIGTERM (only if still alive after join)
                 if self.process.is_alive():
                     logger.warning(f"[{self.worker_id}] Force terminating worker")
                     self.process.terminate()
                     self.process.join(timeout=3)
 
+                    # Escalate: SIGKILL
                     if self.process.is_alive():
                         logger.error(f"[{self.worker_id}] Force killing worker")
                         self.process.kill()
-                        self.process.join()
+                        # CRITICAL: must join after kill to reap zombie
+                        # and release CUDA driver context
+                        self.process.join(timeout=10)
 
         except Exception as e:
             logger.error(f"[{self.worker_id}] Error during shutdown: {e}")
-            if self.process and self.process.is_alive():
-                self.process.kill()
+            if self.process:
+                try:
+                    self.process.kill()
+                    # CRITICAL: reap the zombie even in error path
+                    self.process.join(timeout=10)
+                except Exception as kill_err:
+                    logger.error(
+                        f"[{self.worker_id}] Failed to kill/join in error "
+                        f"handler: {kill_err}"
+                    )
+
+        # Release multiprocessing.Process internal resources (fds, etc.)
+        if self.process is not None:
+            try:
+                self.process.close()
+            except (ValueError, Exception) as close_err:
+                # close() raises ValueError if process is still alive
+                logger.warning(
+                    f"[{self.worker_id}] process.close() failed: {close_err}"
+                )
 
         self.is_alive_flag = False
         logger.info(
@@ -334,6 +374,15 @@ class SubprocessWorkerPool:
 
         # 初始化 workers
         self._init_workers()
+
+        # Start background zombie reaper thread
+        self._reaper_stop = threading.Event()
+        self._reaper_thread = threading.Thread(
+            target=self._zombie_reaper_loop,
+            daemon=True,
+            name=f"zombie-reaper-gpu{device_id}",
+        )
+        self._reaper_thread.start()
 
         logger.info(
             f"[GPU {device_id}] Worker pool initialized with {pool_size} workers"
@@ -585,27 +634,27 @@ class SubprocessWorkerPool:
 
     async def _restart_worker(self, worker: PersistentWorker):
         """
-        重启一个 worker
+        重启一个 worker (non-blocking, warm-spare promotion).
 
-        这个函数会：
-        1. 关闭旧的 worker 进程
-        2. 从 workers 列表中移除
-        3. 创建新的 worker
-        4. 添加到 idle pool
+        Fast path (under lock):
+        1. Remove the old worker from all tracking lists immediately.
+        2. The existing idle spare(s) in the pool are already available
+           for ``_get_idle_worker`` to hand out on the next task.
+
+        Slow path (background thread — does NOT block the caller):
+        3. Shut down the old worker process (synchronous, ~0.5-5 s).
+        4. Sleep 2 s so GPU resources are fully released.
+        5. Spawn a fresh ``PersistentWorker`` as a replacement spare and
+           register it back into the pool (under lock).
         """
         async with self.lock:
             logger.info(
-                f"[{worker.worker_id}] Restarting worker "
-                f"(processed {worker.tasks_processed} tasks)"
+                f"[{worker.worker_id}] Recycling worker "
+                f"(processed {worker.tasks_processed} tasks) — "
+                f"spare replenishment will happen in background"
             )
 
-            # 关闭旧 worker
-            try:
-                worker.shutdown(timeout=5)
-            except Exception as e:
-                logger.error(f"[{worker.worker_id}] Error shutting down: {e}")
-
-            # 从列表中移除
+            # --- fast: remove the dead worker from every list -----------
             if worker in self.workers:
                 self.workers.remove(worker)
             if worker in self.idle_workers:
@@ -613,38 +662,287 @@ class SubprocessWorkerPool:
             if worker in self.busy_workers:
                 self.busy_workers.remove(worker)
 
-            # 等待一小段时间让GPU资源完全释放
-            # 在高负载情况下，立即重启可能导致CUDA初始化缓慢或超时
+            spare_count = len(self.idle_workers)
+            logger.info(
+                f"[{worker.worker_id}] Pool state after removal: "
+                f"workers={len(self.workers)} idle={spare_count} "
+                f"busy={len(self.busy_workers)}"
+            )
+
+        # --- slow: fire-and-forget background replenishment ------------
+        # CRITICAL: capture the actual Process object and PID eagerly,
+        # BEFORE entering the background thread.  The old code captured
+        # ``old_worker`` (an alias for the *same* PersistentWorker object)
+        # and dereferenced ``old_worker.process`` lazily inside the
+        # thread.  By that time, ``shutdown()`` may have called
+        # ``.close()`` on the Process, putting it in an invalid state
+        # where ``.kill()`` / ``.is_alive()`` / ``.join()`` raise
+        # ValueError.  Capturing the raw objects here avoids that class
+        # of bugs entirely.
+        old_worker = worker
+        old_process = worker.process          # multiprocessing.Process – may be None
+        old_pid = old_process.pid if old_process is not None else None
+        old_wid = worker.worker_id            # immutable str, safe to read later
+        _loop = asyncio.get_running_loop()
+
+        def _background_replenish():
+            """Run in a daemon thread — shuts down old worker, waits for
+            GPU release, creates a new spare, and re-registers it.
+
+            CRITICAL: uses only ``old_process`` / ``old_pid`` captured
+            before the thread started. Never touches ``old_worker.process``
+            which may have been replaced by a new spare by now.
+            """
+            # 1. Shut down the old process directly (not via old_worker.shutdown()
+            #    which would operate on old_worker.process — potentially replaced)
+            if old_process is not None:
+                try:
+                    # Send graceful shutdown via the old worker's queue
+                    old_worker.task_queue.put({"command": "GRACEFUL_SHUTDOWN"}, timeout=2)
+                except Exception:
+                    pass
+                try:
+                    old_worker.task_queue.put({"command": "SHUTDOWN"}, timeout=1)
+                except Exception:
+                    pass
+
+                # Wait for exit, then escalate
+                try:
+                    old_process.join(timeout=5)
+                except Exception:
+                    pass
+
+                if old_process.is_alive():
+                    try:
+                        old_process.terminate()
+                        old_process.join(timeout=3)
+                    except Exception:
+                        pass
+
+                if old_process.is_alive():
+                    try:
+                        old_process.kill()
+                        old_process.join(timeout=5)
+                    except Exception:
+                        pass
+
+                # Fallback: direct os.kill
+                try:
+                    os.kill(old_pid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+
+                # Always try to reap
+                try:
+                    old_process.join(timeout=5)
+                except Exception:
+                    pass
+                try:
+                    os.waitpid(old_pid, 0)
+                except Exception:
+                    pass
+                try:
+                    old_process.close()
+                except Exception:
+                    pass
+
+                logger.info(f"[{old_wid}] Old process pid={old_pid} cleanup done")
+
+            # 2. Verify the old process is actually dead; escalate if not.
+            #    All checks use ``old_process`` / ``old_pid`` captured
+            #    before the thread started — never ``old_worker.process``.
+            def _process_still_alive() -> bool:
+                """Check whether the old worker subprocess is still running."""
+                if old_pid is None:
+                    return False
+                try:
+                    os.kill(old_pid, 0)
+                    return True
+                except ProcessLookupError:
+                    return False
+                except OSError:
+                    # Permission error etc — assume alive to be safe
+                    return True
+
+            if _process_still_alive():
+                logger.warning(
+                    f"[{old_wid}] Worker pid={old_pid} still alive "
+                    f"after shutdown(timeout=5); escalating to SIGKILL"
+                )
+                # Force kill via the captured Process handle
+                try:
+                    if old_process is not None:
+                        old_process.kill()  # sends SIGKILL for mp.Process
+                        logger.warning(
+                            f"[{old_wid}] Sent process.kill() to pid={old_pid}"
+                        )
+                except Exception as kill_exc:
+                    logger.warning(
+                        f"[{old_wid}] process.kill() failed: {kill_exc}"
+                    )
+
+                # Fallback: os.kill with SIGKILL (works even if the
+                # Process object is in a bad state after close())
+                if old_pid is not None and _process_still_alive():
+                    try:
+                        os.kill(old_pid, signal.SIGKILL)
+                        logger.warning(
+                            f"[{old_wid}] Sent os.kill(SIGKILL) to pid={old_pid}"
+                        )
+                    except ProcessLookupError:
+                        logger.warning(
+                            f"[{old_wid}] pid={old_pid} already gone "
+                            f"before os.kill"
+                        )
+                    except Exception as os_kill_exc:
+                        logger.warning(
+                            f"[{old_wid}] os.kill(SIGKILL) failed for "
+                            f"pid={old_pid}: {os_kill_exc}"
+                        )
+
+                # Reap the zombie to avoid pid table leak and release CUDA VRAM
+                try:
+                    if old_process is not None:
+                        old_process.join(timeout=10)
+                        logger.warning(
+                            f"[{old_wid}] Reaped killed worker pid={old_pid}"
+                        )
+                except Exception as reap_exc:
+                    logger.warning(
+                        f"[{old_wid}] Failed to reap pid={old_pid}: {reap_exc}"
+                    )
+                    # Last resort: try os.waitpid directly
+                    if old_pid is not None:
+                        try:
+                            os.waitpid(old_pid, os.WNOHANG)
+                            logger.warning(
+                                f"[{old_wid}] os.waitpid fallback "
+                                f"for pid={old_pid}"
+                            )
+                        except ChildProcessError:
+                            pass  # already reaped
+                        except Exception:
+                            pass
+
+                # Verification: confirm the kill actually worked
+                if old_pid is not None:
+                    try:
+                        os.kill(old_pid, 0)
+                        logger.error(
+                            f"[{old_wid}] KILL VERIFICATION FAILED: "
+                            f"pid={old_pid} still alive after SIGKILL + join"
+                        )
+                    except ProcessLookupError:
+                        logger.info(
+                            f"[{old_wid}] KILL VERIFIED: pid={old_pid} confirmed dead"
+                        )
+                    except OSError as verify_exc:
+                        logger.warning(
+                            f"[{old_wid}] KILL VERIFY INCONCLUSIVE for "
+                            f"pid={old_pid}: {verify_exc}"
+                        )
+
+            # Release multiprocessing.Process internal resources
+            if old_process is not None:
+                try:
+                    old_process.close()
+                except (ValueError, Exception):
+                    pass
+
+            # Safety-net check: log if the process is somehow still alive
+            if old_pid is not None:
+                try:
+                    os.kill(old_pid, 0)
+                    # Still alive — log error but don't block replacement
+                    logger.error(
+                        f"[{old_wid}] VRAM LEAK RISK: pid={old_pid} still "
+                        f"alive after shutdown + SIGKILL + reap escalation"
+                    )
+                except (ProcessLookupError, OSError):
+                    pass  # confirmed dead — good
+
+            # 3. Wait for GPU driver to reclaim VRAM from the dead process
             time.sleep(2.0)
 
-            # 创建新 worker（保持相同的 ID）
+            # 4. Create a replacement spare worker
             try:
                 new_worker = PersistentWorker(
-                    worker.worker_id,
+                    old_wid,
                     self.device_id,
                     f"(pool_size={self.pool_size}, max_tasks={self.max_tasks_per_worker}, restart)",
-                    max_tasks_per_worker=self.max_tasks_per_worker
+                    max_tasks_per_worker=self.max_tasks_per_worker,
                 )
-
-                self.workers.append(new_worker)
-                self.idle_workers.append(new_worker)
-                self.total_workers_restarted += 1
-
-                logger.info(
-                    f"[{worker.worker_id}] Worker restarted successfully "
-                    f"(total restarts: {self.total_workers_restarted})"
-                )
-
             except Exception as e:
                 logger.error(
-                    f"[{worker.worker_id}] Failed to restart worker: {e}. "
+                    f"[{old_wid}] Failed to create replacement spare: {e}. "
                     f"Pool now has {len(self.workers)} workers"
                 )
-                # 如果重启失败，pool 会少一个 worker，但仍然可以继续工作
+                return
+
+            # 5. Register the new spare back into the pool (thread-safe
+            #    via the asyncio event-loop).
+            async def _register():
+                async with self.lock:
+                    self.workers.append(new_worker)
+                    self.idle_workers.append(new_worker)
+                    self.total_workers_restarted += 1
+                    logger.info(
+                        f"[{new_worker.worker_id}] Background spare ready — "
+                        f"pool: workers={len(self.workers)} idle={len(self.idle_workers)} "
+                        f"busy={len(self.busy_workers)} "
+                        f"(total restarts: {self.total_workers_restarted})"
+                    )
+
+            # Schedule the coroutine on the event loop from this thread.
+            asyncio.run_coroutine_threadsafe(_register(), _loop)
+
+        t = threading.Thread(target=_background_replenish, daemon=True)
+
+        t.start()
+
+    def _zombie_reaper_loop(self):
+        """Periodically reap zombie child processes.
+
+        The CUDA driver keeps GPU memory allocated for a process until the
+        parent calls waitpid().  If any worker-shutdown path missed the
+        join(), the zombie lingers and VRAM leaks.  This thread acts as a
+        safety net by periodically calling ``multiprocessing.active_children()``
+        (which internally reaps finished children) and explicitly waiting on
+        any known dead processes.
+        """
+        INTERVAL = 30  # seconds between sweeps
+        while not self._reaper_stop.wait(timeout=INTERVAL):
+            try:
+                # active_children() calls waitpid(WNOHANG) for every
+                # child Process that multiprocessing knows about.
+                # This is the cheapest way to reap zombies.
+                alive = mp.active_children()
+                # Also try a blanket waitpid to catch anything
+                # multiprocessing doesn't track.
+                try:
+                    while True:
+                        pid, status = os.waitpid(-1, os.WNOHANG)
+                        if pid == 0:
+                            break
+                        logger.info(
+                            f"[GPU {self.device_id}] Zombie reaper: "
+                            f"reaped pid={pid} status={status}"
+                        )
+                except ChildProcessError:
+                    pass  # no more children
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.warning(
+                    f"[GPU {self.device_id}] Zombie reaper error: {e}"
+                )
 
     async def shutdown(self, timeout: int = 30):
         """关闭整个 worker pool"""
         logger.info(f"[GPU {self.device_id}] Shutting down worker pool...")
+
+        # Stop the zombie reaper thread
+        self._reaper_stop.set()
 
         # 关闭所有 workers
         for worker in self.workers:
@@ -751,8 +1049,25 @@ def _persistent_worker_loop(
                 task_data = task_queue.get()
 
                 # 检查是否是 shutdown 命令
-                if isinstance(task_data, dict) and task_data.get("command") == "SHUTDOWN":
-                    print(f"[{worker_id}] Received SHUTDOWN command", file=sys.stderr)
+                if isinstance(task_data, dict) and task_data.get("command") in ("SHUTDOWN", "GRACEFUL_SHUTDOWN"):
+                    cmd = task_data.get("command")
+                    print(f"[{worker_id}] Received {cmd} command", file=sys.stderr)
+                    if cmd == "GRACEFUL_SHUTDOWN":
+                        # Perform thorough GPU cleanup before exiting so
+                        # that the CUDA context is released cleanly without
+                        # needing SIGKILL.
+                        print(
+                            f"[{worker_id}] Graceful shutdown: cleaning up GPU...",
+                            file=sys.stderr,
+                        )
+                        try:
+                            _aggressive_gpu_cleanup(device_id)
+                        except Exception as e:
+                            print(
+                                f"[{worker_id}] GPU cleanup during graceful "
+                                f"shutdown failed: {e}",
+                                file=sys.stderr,
+                            )
                     break
 
                 # 执行任务

@@ -71,7 +71,7 @@ class GPUWorker:
         # Each GPU worker maintains a pool of subprocess workers
         # Pool size and per-worker task limit are configurable to enforce isolation.
         self.worker_pool: Optional[SubprocessWorkerPool] = None
-        self.pool_size = getattr(settings, "worker_pool_size", 1)
+        self.pool_size = getattr(settings, "worker_pool_size", 2)
         self.max_tasks_per_worker = getattr(settings, "max_tasks_per_worker", 1)
         
         # GPU device setup (主进程不使用CUDA，只存储device_id)

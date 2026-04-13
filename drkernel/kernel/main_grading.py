@@ -1722,7 +1722,14 @@ def main_task(config):
             conversations[uid]['total_score'] += scores[i]
 
         # Write to JSONL (one conversation per line)
-        jsonl_path = output_path.replace('.parquet', '_conversations.jsonl').replace('.jsonl', '_conversations.jsonl')
+        if output_path.endswith('_conversations.jsonl'):
+            jsonl_path = output_path
+        elif output_path.endswith('.parquet'):
+            jsonl_path = output_path[:-len('.parquet')] + '_conversations.jsonl'
+        elif output_path.endswith('.jsonl'):
+            jsonl_path = output_path[:-len('.jsonl')] + '_conversations.jsonl'
+        else:
+            jsonl_path = output_path + '_conversations.jsonl'
         os.makedirs(os.path.dirname(jsonl_path), exist_ok=True)
         with open(jsonl_path, 'w') as f:
             for uid, data in conversations.items():
@@ -2214,9 +2221,12 @@ def main_task(config):
 
         # convert list of dict to dict of list (only for valid entries with kernel metrics)
         if len(valid_reward_extra_info_list) > 0:
+            all_keys = set()
+            for d in valid_reward_extra_info_list:
+                all_keys.update(d.keys())
             raw_reward_extra_info_dict = {
-                k: [d[k] for d in valid_reward_extra_info_list]
-                for k in valid_reward_extra_info_list[0].keys()
+                k: [d.get(k) for d in valid_reward_extra_info_list]
+                for k in all_keys
             }
 
             if reward_extra_info_dict is None:

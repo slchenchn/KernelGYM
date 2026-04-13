@@ -10,3 +10,8 @@ outputs/
 wandb/
 checkpoints/
 kernelgym/*probe*/
+.python-runtime
+CLAUDE.md
+handoffs/
+.vscode/
+debug/

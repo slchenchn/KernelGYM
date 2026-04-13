@@ -16,6 +16,8 @@ class EvaluationTask:
     backend: str = "triton"
     num_correct_trials: int = 5
     num_perf_trials: int = 100
+    num_warmup: int = 3
+    perf_trim_count: int = 0
     timeout: int = 300
     device: str = "cuda:0"
     priority: str = "normal"
@@ -53,6 +55,8 @@ class ReferenceTimingTask:
     backend_adapter: str = "kernelbench"
     backend: str = "triton"
     num_perf_trials: int = 100
+    num_warmup: int = 3
+    perf_trim_count: int = 0
     timeout: int = 300
     device: str = "cuda:0"
     priority: str = "normal"
@@ -82,6 +86,8 @@ class KernelEvaluationTask:
     backend: str = "triton"
     num_correct_trials: int = 5
     num_perf_trials: int = 100
+    num_warmup: int = 3
+    perf_trim_count: int = 0
     timeout: int = 300
     device: str = "cuda:0"
     priority: str = "normal"

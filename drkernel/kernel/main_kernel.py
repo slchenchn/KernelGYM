@@ -19,14 +19,15 @@ from functools import partial
 
 import hydra
 import ray
+from omegaconf import OmegaConf
 
 from .kernel_trainer import RayKernelTrainer
 from .constant import QWEN3CHATTEMPLATE
+from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
 
 def get_custom_reward_fn(config):
     import importlib.util
-    import os
 
     reward_fn_config = config.get("custom_reward_function") or {}
     file_path = reward_fn_config.get("path")
@@ -97,12 +98,20 @@ def run_ppo(config) -> None:
     # isolation, will solve in the future
     os.environ["ENSURE_CUDA_VISIBLE_DEVICES"] = os.environ.get('CUDA_VISIBLE_DEVICES', '')
     if not ray.is_initialized():
-        # this is for local ray cluster
-        ray.init(
-            runtime_env={
-                'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN', 'VLLM_LOGGING_LEVEL': 'WARN'}
-            }
+        default_runtime_env = get_ppo_ray_runtime_env()
+        ray_init_kwargs = OmegaConf.to_container(config.ray_kwargs.get("ray_init", {}), resolve=True)
+        runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
+        runtime_env = OmegaConf.to_container(
+            OmegaConf.merge(default_runtime_env, OmegaConf.create(runtime_env_kwargs)),
+            resolve=True,
         )
+        env_vars = runtime_env.get("env_vars", {})
+        runtime_env["env_vars"] = {key: str(value) for key, value in env_vars.items() if value is not None}
+        ray_init_kwargs = {**ray_init_kwargs, "runtime_env": runtime_env}
+        if os.environ.get("RAY_ADDRESS") and not ray_init_kwargs.get("address"):
+            ray_init_kwargs["address"] = os.environ["RAY_ADDRESS"]
+        print(f"ray init kwargs: {ray_init_kwargs}")
+        ray.init(**ray_init_kwargs)
 
     runner = TaskRunner.remote()
     ray.get(runner.run.remote(config))

@@ -120,9 +120,9 @@ class Settings(BaseSettings):
     worker_execution_timeout_grace_sec: int = Field(default=60, env="WORKER_EXECUTION_TIMEOUT_GRACE_SEC")
     worker_execution_timeout_monitor_interval: int = Field(default=30, env="WORKER_EXECUTION_TIMEOUT_MONITOR_INTERVAL")
     worker_pool_size: int = Field(
-        default=1,
+        default=2,
         env="WORKER_POOL_SIZE",
-        description="Number of persistent subprocess workers per GPU. Set to 1 for strict serial execution.",
+        description="Number of persistent subprocess workers per GPU. 2 = 1 active + 1 warm spare for zero-downtime recycling.",
     )
     max_tasks_per_worker: int = Field(
         default=1,

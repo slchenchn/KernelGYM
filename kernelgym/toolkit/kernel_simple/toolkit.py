@@ -292,7 +292,7 @@ class KernelSimpleToolkit(Toolkit):
                     device=device,
                     enable_profiling=bool(enable_profiling),
                 )
-                runtime_stats = get_timing_stats(elapsed_times, device=device)
+                runtime_stats = get_timing_stats(elapsed_times, device=device, trim_count=task_obj.perf_trim_count)
                 metadata["runtime_stats"] = runtime_stats
                 kernel_runtime = runtime_stats["mean"]
                 if enable_profiling and profiling_metrics:

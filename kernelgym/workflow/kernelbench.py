@@ -20,6 +20,7 @@ from .kernelbench_helpers import (
     _combine_results,
     _create_paired_tasks,
     _get_cached_reference_runtime,
+    _put_cached_reference_runtime,
     _validate_code,
 )
 
@@ -175,6 +176,14 @@ class KernelBenchWorkflowController(WorkflowController):
             result = self._kernel_only_result(eval_task, kernel_result)
             self._persist_result(eval_task, result)
             return result
+
+        if eval_task.use_reference_cache and eval_task.uuid:
+            _put_cached_reference_runtime(
+                eval_task.uuid,
+                eval_task.reference_code,
+                eval_task.is_valid,
+                ref_result.reference_runtime,
+            )
 
         combined = _combine_results(ref_result, kernel_result)
         result = combined.to_dict()

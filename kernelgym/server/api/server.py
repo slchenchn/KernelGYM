@@ -30,6 +30,8 @@ from .utils import get_system_health, get_system_metrics, format_timestamp
 from kernelgym.server.task_manager import TaskManager
 from kernelgym.server.scheduler import TaskManagerScheduler
 from kernelgym.workflow import get_workflow_controller
+from kernelgym.workflow.kernelbench_helpers import set_reference_cache
+from kernelgym.workflow.reference_cache import build_reference_runtime_cache
 from redis.exceptions import BusyLoadingError, ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError, ResponseError as RedisResponseError
 from kernelgym.utils.error_classifier import classify_error
 from kernelgym.common import ErrorCode, TaskStatus
@@ -84,7 +86,17 @@ async def lifespan(app: FastAPI):
     task_manager = TaskManager(redis_client)
     await task_manager.initialize()
     logger.info("Task manager initialized")
-    
+
+    reference_cache = build_reference_runtime_cache(
+        redis_url=settings.redis_url,
+        redis_key_prefix=settings.redis_key_prefix,
+        reference_cache_dataset_path=settings.reference_cache_dataset_path,
+        val_data_cache_dataset_path=settings.val_data_cache_dataset_path,
+    )
+    set_reference_cache(reference_cache)
+    app.state.reference_cache = reference_cache
+    logger.info("Reference cache initialized: %s", reference_cache.describe())
+
     # Initialize GPU workers
     logger.info(f"Initializing GPU workers for devices: {settings.gpu_devices}")
     

@@ -99,6 +99,8 @@ REWARD_TASK_TIMEOUT=${REWARD_TASK_TIMEOUT:-600}
 REWARD_TASK_TIMEOUT_CLIENT=${REWARD_TASK_TIMEOUT_CLIENT:-2400}
 REWARD_PRINT_STATUS=${REWARD_PRINT_STATUS:-True}
 NUM_PERF_TRIALS=${NUM_PERF_TRIALS:-100}
+NUM_WARMUP=${NUM_WARMUP:-3}
+PERF_TRIM_COUNT=${PERF_TRIM_COUNT:-0}
 NUM_CORRECT_TRIALS=${NUM_CORRECT_TRIALS:-5}
 SPEEDUP_REWARD_UPPER_BOUND=${SPEEDUP_REWARD_UPPER_BOUND:-3.0}
 
@@ -277,6 +279,8 @@ parse_arguments() {
       --reward_print_status) REWARD_PRINT_STATUS="$2"; shift 2 ;;
       --reward_weights) REWARD_WEIGHTS="$2"; shift 2 ;;
       --num_perf_trials) NUM_PERF_TRIALS="$2"; shift 2 ;;
+      --num_warmup) NUM_WARMUP="$2"; shift 2 ;;
+      --perf_trim_count) PERF_TRIM_COUNT="$2"; shift 2 ;;
       --num_correct_trials) NUM_CORRECT_TRIALS="$2"; shift 2 ;;
       --speedup_reward_upper_bound) SPEEDUP_REWARD_UPPER_BOUND="$2"; shift 2 ;;
       --custom_reward_path) CUSTOM_REWARD_PATH="$2"; shift 2 ;;
@@ -447,6 +451,8 @@ run_grading() {
       reward_model.task_timeout_in_client=$REWARD_TASK_TIMEOUT_CLIENT \
       reward_model.print_status=$REWARD_PRINT_STATUS \
       reward_model.num_perf_trials=$NUM_PERF_TRIALS \
+      reward_model.num_warmup=$NUM_WARMUP \
+      reward_model.perf_trim_count=$PERF_TRIM_COUNT \
       reward_model.num_correct_trials=$NUM_CORRECT_TRIALS \
       reward_model.speedup_reward_upper_bound=$SPEEDUP_REWARD_UPPER_BOUND \
       reward_model.reward_weights.compilation=$REWARD_WEIGHT_COMPILATION \

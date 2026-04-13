@@ -135,7 +135,11 @@ def run_profiling_only(
     return profiling_metrics
 
 
-def get_timing_stats(elapsed_times: List[float], device: torch.device = None) -> dict:
+def get_timing_stats(
+    elapsed_times: List[float],
+    device: torch.device = None,
+    trim_count: int = 0,
+) -> dict:
     stats = {
         "mean": float(f"{np.mean(elapsed_times):.3g}"),
         "std": float(f"{np.std(elapsed_times):.3g}"),
@@ -143,6 +147,16 @@ def get_timing_stats(elapsed_times: List[float], device: torch.device = None) ->
         "max": float(f"{np.max(elapsed_times):.3g}"),
         "num_trials": len(elapsed_times),
     }
+
+    if trim_count > 0 and len(elapsed_times) > 2 * trim_count:
+        sorted_times = sorted(elapsed_times)
+        trimmed = sorted_times[trim_count:-trim_count]
+        stats["trimmed_mean"] = float(f"{np.mean(trimmed):.3g}")
+        stats["trimmed_std"] = float(f"{np.std(trimmed):.3g}")
+        stats["trim_count"] = trim_count
+        # Use trimmed mean as the primary mean
+        stats["raw_mean"] = stats["mean"]
+        stats["mean"] = stats["trimmed_mean"]
 
     if device:
         stats["hardware"] = torch.cuda.get_device_name(device=device)

@@ -126,6 +126,8 @@ def _run_performance_step(
     get_inputs,
     metadata: Dict[str, Any],
     num_perf_trials: int,
+    num_warmup: int = 3,
+    perf_trim_count: int = 0,
     verbose: bool,
     seed_num: int,
     device: Union[torch.device, int],
@@ -158,12 +160,13 @@ def _run_performance_step(
             elapsed_times, profiling_metrics, timing_info = time_execution_with_cuda_event(
                 model_new,
                 *inputs,
+                num_warmup=num_warmup,
                 num_trials=num_perf_trials,
                 verbose=verbose,
                 device=device,
                 enable_profiling=enable_profiling,
             )
-            runtime_stats = get_timing_stats(elapsed_times, device=device)
+            runtime_stats = get_timing_stats(elapsed_times, device=device, trim_count=perf_trim_count)
             metadata["kg_kernel_perf_warmup_s"] = timing_info["warmup_wall_s"]
             metadata["kg_kernel_perf_measure_wall_s"] = timing_info["measure_wall_s"]
             metadata["kg_kernel_perf_measure_cuda_event_s"] = timing_info[
@@ -173,6 +176,10 @@ def _run_performance_step(
             metadata["kg_kernel_perf_total_s"] = timing_info["total_wall_s"]
             metadata["kg_kernel_perf_num_trials"] = timing_info["num_trials"]
             metadata["kg_kernel_perf_num_warmup"] = timing_info["num_warmup"]
+            metadata["kg_kernel_perf_mean_ms"] = runtime_stats["mean"]
+            metadata["kg_kernel_perf_std_ms"] = runtime_stats["std"]
+            metadata["kg_kernel_perf_min_ms"] = runtime_stats["min"]
+            metadata["kg_kernel_perf_max_ms"] = runtime_stats["max"]
             metadata["kg_kernel_perf_num_profile_trials"] = timing_info[
                 "num_profiling_trials"
             ]
@@ -355,6 +362,8 @@ def eval_kernel_against_ref(
     seed_num: int = 42,
     num_correct_trials: int = 1,
     num_perf_trials: int = 10,
+    num_warmup: int = 3,
+    perf_trim_count: int = 0,
     verbose: bool = True,
     measure_performance: bool = True,
     build_dir: os.PathLike = None,
@@ -582,6 +591,8 @@ def eval_kernel_against_ref(
             get_inputs=get_inputs,
             metadata=metadata,
             num_perf_trials=num_perf_trials,
+            num_warmup=num_warmup,
+            perf_trim_count=perf_trim_count,
             verbose=verbose,
             seed_num=seed_num,
             device=device,
@@ -599,6 +610,8 @@ def eval_reference_only(
     original_model_src: str,
     seed_num: int = 42,
     num_perf_trials: int = 10,
+    num_warmup: int = 3,
+    perf_trim_count: int = 0,
     verbose: bool = False,
     device: Union[torch.device, int] = (
         torch.cuda.current_device() if torch.cuda.is_available() else None
@@ -698,12 +711,13 @@ def eval_reference_only(
         elapsed_times, _, timing_info = time_execution_with_cuda_event(
             model,
             *inputs,
+            num_warmup=num_warmup,
             num_trials=num_perf_trials,
             verbose=verbose,
             device=device,
             enable_profiling=False,
         )
-        runtime_stats = get_timing_stats(elapsed_times, device=device)
+        runtime_stats = get_timing_stats(elapsed_times, device=device, trim_count=perf_trim_count)
         metadata["kg_reference_perf_warmup_s"] = timing_info["warmup_wall_s"]
         metadata["kg_reference_perf_measure_wall_s"] = timing_info["measure_wall_s"]
         metadata["kg_reference_perf_measure_cuda_event_s"] = timing_info[
@@ -712,6 +726,10 @@ def eval_reference_only(
         metadata["kg_reference_perf_total_s"] = timing_info["total_wall_s"]
         metadata["kg_reference_perf_num_trials"] = timing_info["num_trials"]
         metadata["kg_reference_perf_num_warmup"] = timing_info["num_warmup"]
+        metadata["kg_reference_perf_mean_ms"] = runtime_stats["mean"]
+        metadata["kg_reference_perf_std_ms"] = runtime_stats["std"]
+        metadata["kg_reference_perf_min_ms"] = runtime_stats["min"]
+        metadata["kg_reference_perf_max_ms"] = runtime_stats["max"]
 
         if verbose:
             print(f"[Eval] Performance Stats: {runtime_stats}")

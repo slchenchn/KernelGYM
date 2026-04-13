@@ -42,7 +42,9 @@ reward_model:
   max_retries: 3
   task_timeout: 600  # 180 default
   task_timeout_in_client: 1800  # 180 default
-  num_perf_trials: 100
+  num_perf_trials: 50
+  num_warmup: 30
+  perf_trim_count: 5
   num_correct_trials: 5
   enable_profiling: true
   verbose_errors: true

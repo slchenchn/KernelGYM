@@ -312,6 +312,8 @@ reward_model:
 
   # Performance evaluation
   num_perf_trials: 100
+  num_warmup: 3
+  perf_trim_count: 0
   num_correct_trials: 5
   enable_profiling: true
   verbose_errors: true

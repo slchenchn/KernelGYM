@@ -691,6 +691,8 @@ class KernelRewardClient:
                 "backend": "triton",
                 "num_correct_trials": task.get("num_correct_trials", 5),
                 "num_perf_trials": task.get("num_perf_trials", 100),
+                "num_warmup": task.get("num_warmup", 3),
+                "perf_trim_count": task.get("perf_trim_count", 0),
                 "timeout": per_task_timeout,
                 "priority": "normal",
                 "entry_point": ep,

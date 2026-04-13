@@ -134,6 +134,8 @@ MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-4096}
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-32}     # Mini-batch size for PPO updates
 PPO_MICRO_TOKEN=${PPO_MICRO_TOKEN:-null}           # Auto-calculated based on model size
+FSDP_SIZE=${FSDP_SIZE:--1}                        # -1=FULL_SHARD, N=HYBRID_SHARD with N GPUs per shard group
+FSDP_REDUCE_DTYPE=${FSDP_REDUCE_DTYPE:-fp32}      # Dtype for gradient all-reduce (fp32 or bf16)
 # Dual-clip PPO parameters (low_high format)
 # Standard PPO uses symmetric clipping (e.g., 0.2_0.2)
 # Dual-clip uses asymmetric clipping to handle negative advantages better
@@ -165,6 +167,18 @@ ROLLOUT_GPU_MEMORY_UTIL=${ROLLOUT_GPU_MEMORY_UTIL:-0.75}
 ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-False}
 ACTOR_PARAMETER_OFFLOAD=${ACTOR_PARAMETER_OFFLOAD:-False}
 MODEL_NAME=${MODEL_NAME:-Qwen3-8B-Base}
+ROLLOUT_MODEL_PATH=${ROLLOUT_MODEL_PATH:-""}
+ROLLOUT_TOKENIZER_PATH=${ROLLOUT_TOKENIZER_PATH:-""}
+ROLLOUT_ONLINE_QUANTIZATION_PRESET=${ROLLOUT_ONLINE_QUANTIZATION_PRESET:-""}
+ROLLOUT_ONLINE_QUANTIZATION_IGNORE=${ROLLOUT_ONLINE_QUANTIZATION_IGNORE:-""}
+ROLLOUT_VLLM_QUANTIZATION=${ROLLOUT_VLLM_QUANTIZATION:-""}
+ROLLOUT_VLLM_LOAD_FORMAT=${ROLLOUT_VLLM_LOAD_FORMAT:-""}
+ROLLOUT_VLLM_MODEL_LOADER_EXTRA_CONFIG=${ROLLOUT_VLLM_MODEL_LOADER_EXTRA_CONFIG:-""}
+ROLLOUT_VLLM_ALLOW_DEPRECATED_QUANTIZATION=${ROLLOUT_VLLM_ALLOW_DEPRECATED_QUANTIZATION:-""}
+MODEL_ATTN_IMPLEMENTATION=${MODEL_ATTN_IMPLEMENTATION:-flash_attention_2}
+MODEL_USE_REMOVE_PADDING=${MODEL_USE_REMOVE_PADDING:-True}
+ACTOR_USE_TORCH_COMPILE=${ACTOR_USE_TORCH_COMPILE:-""}
+REF_USE_TORCH_COMPILE=${REF_USE_TORCH_COMPILE:-""}
 SAVE_FREQ=${SAVE_FREQ:-10}
 TEST_FREQ=${TEST_FREQ:-10}
 TRAINER_LOGGERS=${TRAINER_LOGGERS:-"['console','wandb']"}
@@ -202,6 +216,8 @@ REWARD_TASK_TIMEOUT=${REWARD_TASK_TIMEOUT:-600}
 REWARD_TASK_TIMEOUT_CLIENT=${REWARD_TASK_TIMEOUT_CLIENT:-2400}
 REWARD_PRINT_STATUS=${REWARD_PRINT_STATUS:-True}
 NUM_PERF_TRIALS=${NUM_PERF_TRIALS:-100}
+NUM_WARMUP=${NUM_WARMUP:-3}
+PERF_TRIM_COUNT=${PERF_TRIM_COUNT:-0}
 REFERENCE_BACKEND=${REFERENCE_BACKEND:-"torch_compile"}
 
 # Optional dump directories
@@ -234,7 +250,7 @@ generate_model_micro_token() {
 
   if [ "$PPO_MICRO_TOKEN" = "null" ]; then
     # Extract the model size (e.g., 7B, 14B, 32B) using regex
-    if [[ $model_name =~ ([0-9]+)B ]]; then
+    if [[ $model_name =~ ([0-9]+)[bB] ]]; then
       local model_size="${BASH_REMATCH[1]}"
 
       # Set the basic config based on model size
@@ -630,8 +646,18 @@ PY
     MODEL_PATH_RESOLVED="$MODEL_NAME"
   fi
 
+  ROLLOUT_MODEL_PATH_RESOLVED=""
+  if [[ -n "${ROLLOUT_MODEL_PATH:-}" ]]; then
+    ROLLOUT_MODEL_PATH_RESOLVED="$ROLLOUT_MODEL_PATH"
+  fi
+
+  ROLLOUT_TOKENIZER_PATH_RESOLVED=""
+  if [[ -n "${ROLLOUT_TOKENIZER_PATH:-}" ]]; then
+    ROLLOUT_TOKENIZER_PATH_RESOLVED="$ROLLOUT_TOKENIZER_PATH"
+  fi
+
   if [[ -n "${HDFS_CHECKPOINT_PATH}" ]]; then
-    CHECKPOINT_DIR="${HDFS_CHECKPOINT_PATH}/${RUN_NAME}"
+    CHECKPOINT_DIR="${HDFS_CHECKPOINT_PATH}"
   else
     CHECKPOINT_DIR="checkpoints/${RUN_NAME}"
   fi
@@ -640,6 +666,8 @@ PY
 
   export RUN_NAME
   export MODEL_PATH_RESOLVED
+  export ROLLOUT_MODEL_PATH_RESOLVED
+  export ROLLOUT_TOKENIZER_PATH_RESOLVED
   export CHECKPOINT_DIR
   export N_GPUS_PER_NODE
   echo "FULL RUN_NAME: $RUN_NAME"
@@ -649,6 +677,12 @@ PY
   echo "Max Response Length: $MAX_RESPONSE_LENGTH"
   echo "Learning Rate: $LEARNING_RATE"
   echo "PPO Mini Batch Size: $PPO_MINI_BATCH_SIZE"
+  if [ -n "${ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-}" ]; then
+    echo "Rollout Log Prob Micro Batch Size per GPU: $ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU"
+  fi
+  if [ -n "${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:-}" ]; then
+    echo "Ref Log Prob Micro Batch Size per GPU: $REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU"
+  fi
   echo "KL Loss Coefficient: $KL_LOSS_COEF"
   echo "KL Loss Type: $KL_LOSS_TYPE"
   echo "Temperature: $TEMPERATURE"
@@ -658,6 +692,18 @@ PY
   echo "Total Epochs: $TOTAL_EPOCHS"
   echo "Model Name: $MODEL_NAME"
   echo "Model Path: $MODEL_PATH_RESOLVED"
+  if [[ -n "${ROLLOUT_MODEL_PATH_RESOLVED:-}" ]]; then
+    echo "Rollout Model Path: $ROLLOUT_MODEL_PATH_RESOLVED"
+  fi
+  if [[ -n "${ROLLOUT_TOKENIZER_PATH_RESOLVED:-}" ]]; then
+    echo "Rollout Tokenizer Path: $ROLLOUT_TOKENIZER_PATH_RESOLVED"
+  fi
+  if [[ -n "${ROLLOUT_VLLM_QUANTIZATION:-}" ]]; then
+    echo "Rollout vLLM Quantization: $ROLLOUT_VLLM_QUANTIZATION"
+  fi
+  if [[ -n "${ROLLOUT_ONLINE_QUANTIZATION_PRESET:-}" ]]; then
+    echo "Rollout Online Quantization Preset: $ROLLOUT_ONLINE_QUANTIZATION_PRESET"
+  fi
   echo "Checkpoint Dir: $CHECKPOINT_DIR"
   echo "GPUs per Node: $N_GPUS_PER_NODE"
   echo "Remove Clip: $REMOVE_CLIP"
@@ -704,6 +750,32 @@ PY
 run_training() {
   sleep 3
 
+  local -a rollout_vllm_extra_args=()
+  if [[ -n "${ROLLOUT_MODEL_PATH_RESOLVED:-}" ]]; then
+    rollout_vllm_extra_args+=("+actor_rollout_ref.rollout.model_path=$ROLLOUT_MODEL_PATH_RESOLVED")
+  fi
+  if [[ -n "${ROLLOUT_TOKENIZER_PATH_RESOLVED:-}" ]]; then
+    rollout_vllm_extra_args+=("+actor_rollout_ref.rollout.tokenizer_path=$ROLLOUT_TOKENIZER_PATH_RESOLVED")
+  fi
+  if [[ -n "${ROLLOUT_ONLINE_QUANTIZATION_PRESET:-}" ]]; then
+    rollout_vllm_extra_args+=("+actor_rollout_ref.rollout.online_quantization_preset=$ROLLOUT_ONLINE_QUANTIZATION_PRESET")
+  fi
+  if [[ -n "${ROLLOUT_ONLINE_QUANTIZATION_IGNORE:-}" ]]; then
+    rollout_vllm_extra_args+=("+actor_rollout_ref.rollout.online_quantization_ignore=$ROLLOUT_ONLINE_QUANTIZATION_IGNORE")
+  fi
+  if [[ -n "${ROLLOUT_VLLM_QUANTIZATION:-}" ]]; then
+    rollout_vllm_extra_args+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.quantization=$ROLLOUT_VLLM_QUANTIZATION")
+  fi
+  if [[ -n "${ROLLOUT_VLLM_LOAD_FORMAT:-}" ]]; then
+    rollout_vllm_extra_args+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.load_format=$ROLLOUT_VLLM_LOAD_FORMAT")
+  fi
+  if [[ -n "${ROLLOUT_VLLM_MODEL_LOADER_EXTRA_CONFIG:-}" ]]; then
+    rollout_vllm_extra_args+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.model_loader_extra_config=$ROLLOUT_VLLM_MODEL_LOADER_EXTRA_CONFIG")
+  fi
+  if [[ -n "${ROLLOUT_VLLM_ALLOW_DEPRECATED_QUANTIZATION:-}" ]]; then
+    rollout_vllm_extra_args+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.allow_deprecated_quantization=$ROLLOUT_VLLM_ALLOW_DEPRECATED_QUANTIZATION")
+  fi
+
   PYTHONUNBUFFERED=1 python -m kernel.main_kernel \
       trainer.val_before_train=$VAL_BEFORE_TRAIN \
       algorithm.adv_estimator=$ALGORITHM \
@@ -736,9 +808,11 @@ run_training() {
       actor_rollout_ref.rollout.multi_turn.enable=$ENABLE_MULTI_TURN \
       actor_rollout_ref.rollout.multi_turn.max_user_turns=$MAX_TURN \
       actor_rollout_ref.model.path=$MODEL_PATH_RESOLVED \
+      +actor_rollout_ref.model.override_config.attn_implementation=$MODEL_ATTN_IMPLEMENTATION \
       actor_rollout_ref.actor.optim.lr=$LEARNING_RATE \
-      actor_rollout_ref.model.use_remove_padding=True \
+      actor_rollout_ref.model.use_remove_padding=$MODEL_USE_REMOVE_PADDING \
       actor_rollout_ref.actor.ppo_mini_batch_size=$PPO_MINI_BATCH_SIZE \
+      actor_rollout_ref.actor.use_torch_compile=$ACTOR_USE_TORCH_COMPILE \
       actor_rollout_ref.actor.use_dynamic_bsz=True \
       actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$PPO_MICRO_TOKEN \
       actor_rollout_ref.actor.use_kl_loss=$USE_KL_LOSS \
@@ -752,9 +826,11 @@ run_training() {
       actor_rollout_ref.actor.loss_scale_factor=$LOSS_SCALE_FACTOR \
       actor_rollout_ref.actor.extreme_risk_prob_threshold=$EXTREME_RISK_PROB_THRESHOLD \
       actor_rollout_ref.actor.grad_clip=$GRAD_CLIP \
-      actor_rollout_ref.model.enable_gradient_checkpointing=True \
+      actor_rollout_ref.model.enable_gradient_checkpointing=${ENABLE_GRADIENT_CHECKPOINTING:-True} \
+      actor_rollout_ref.actor.fsdp_config.fsdp_size=$FSDP_SIZE \
       actor_rollout_ref.actor.fsdp_config.param_offload=$ACTOR_PARAMETER_OFFLOAD \
       actor_rollout_ref.actor.fsdp_config.optimizer_offload=$ACTOR_OPTIMIZER_OFFLOAD \
+      +actor_rollout_ref.actor.fsdp_config.mixed_precision.reduce_dtype=$FSDP_REDUCE_DTYPE \
       actor_rollout_ref.actor.ulysses_sequence_parallel_size=$SP_SIZE \
       actor_rollout_ref.rollout.enforce_eager=$ENFORCE_EAGER \
       actor_rollout_ref.rollout.free_cache_engine=$FREE_CACHE_ENGINE \
@@ -763,6 +839,7 @@ run_training() {
       actor_rollout_ref.rollout.top_k=$TOP_K \
       actor_rollout_ref.rollout.min_p=$MIN_P \
       actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$LOG_PROB_MICRO_TOKEN \
+      ${ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:++actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$ROLLOUT_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \
       actor_rollout_ref.rollout.tensor_model_parallel_size=$ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE \
       actor_rollout_ref.rollout.name=vllm \
       actor_rollout_ref.rollout.mode=$ROLLOUT_MODE \
@@ -775,10 +852,18 @@ run_training() {
       actor_rollout_ref.rollout.val_kwargs.max_user_turns=$VAL_MAX_TURN \
       actor_rollout_ref.rollout.max_num_batched_tokens=$max_num_batched_tokens \
       actor_rollout_ref.rollout.calculate_log_probs=$CALCULATE_LOG_PROBS \
+      "${rollout_vllm_extra_args[@]}" \
       actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=$LOG_PROB_MICRO_TOKEN \
+      ${REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU:++actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$REF_LOG_PROB_MICRO_BATCH_SIZE_PER_GPU} \
+      actor_rollout_ref.ref.use_torch_compile=$REF_USE_TORCH_COMPILE \
+      actor_rollout_ref.ref.fsdp_config.fsdp_size=$FSDP_SIZE \
       actor_rollout_ref.ref.fsdp_config.param_offload=True \
       actor_rollout_ref.ref.ulysses_sequence_parallel_size=$SP_SIZE\
+      +critic.model.override_config.attn_implementation=$MODEL_ATTN_IMPLEMENTATION \
+      critic.model.use_remove_padding=$MODEL_USE_REMOVE_PADDING \
       reward_model.enable=False \
+      +reward_model.model.override_config.attn_implementation=$MODEL_ATTN_IMPLEMENTATION \
+      reward_model.model.use_remove_padding=$MODEL_USE_REMOVE_PADDING \
       reward_model.reward_manager=$REWARD_MANAGER \
       reward_model.enhanced=$REWARD_ENHANCED \
       reward_model.use_sandbox_rate_limit=$REWARD_USE_SANDBOX_RATE_LIMIT \
@@ -791,6 +876,8 @@ run_training() {
       reward_model.max_retries=$REWARD_MAX_RETRIES \
       reward_model.task_timeout=$REWARD_TASK_TIMEOUT \
       reward_model.num_perf_trials=$NUM_PERF_TRIALS \
+      reward_model.num_warmup=$NUM_WARMUP \
+      reward_model.perf_trim_count=$PERF_TRIM_COUNT \
       reward_model.print_status=$REWARD_PRINT_STATUS \
       reward_model.reward_func_name=$REWARD_FUNC_NAME \
       reward_model.reference_backend=$REFERENCE_BACKEND \
@@ -805,6 +892,8 @@ run_training() {
       reward_model.coverage_rs_key=$COVERAGE_RS_KEY \
       reward_model.speedup_threshold=$SPEEDUP_THRESHOLD \
       reward_model.detect_decoy_kernel=$DETECT_DECOY_KERNEL \
+      reward_model.reference_cache.enable=${REFERENCE_CACHE_ENABLE:-false} \
+      reward_model.reference_cache.auto_generate_uuid=${REFERENCE_CACHE_AUTO_UUID:-false} \
       algorithm.reward_shaping=$REWARD_SHAPING \
       algorithm.unbiased_shaping=$UNBIASED_SHAPING \
       algorithm.adv_estimator=${ALGORITHM:-grpo} \
@@ -822,6 +911,16 @@ run_training() {
       trainer.experiment_name=$RUN_NAME \
       trainer.n_gpus_per_node=$N_GPUS_PER_NODE \
       trainer.nnodes=$NNODES \
+      custom_reward_function.path=${DRKERNEL_ROOT}/kernel/rewards/kernel_reward.py \
+      ${RAY_ADDRESS:++ray_kwargs.ray_init.address=$RAY_ADDRESS} \
+      ${GLOO_SOCKET_IFNAME:++ray_kwargs.ray_init.runtime_env.env_vars.GLOO_SOCKET_IFNAME=$GLOO_SOCKET_IFNAME} \
+      ${NCCL_SOCKET_IFNAME:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME} \
+      ${NCCL_NET:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_NET=$NCCL_NET} \
+      ${NCCL_IB_DISABLE:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_IB_DISABLE=$NCCL_IB_DISABLE} \
+      ${NCCL_SOCKET_FAMILY:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SOCKET_FAMILY=$NCCL_SOCKET_FAMILY} \
+      ${NCCL_DEBUG:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_DEBUG=$NCCL_DEBUG} \
+      ${GRADIENT_CHECKPOINT_INTERVAL:++ray_kwargs.ray_init.runtime_env.env_vars.GRADIENT_CHECKPOINT_INTERVAL=$GRADIENT_CHECKPOINT_INTERVAL} \
+      ${DRKERNEL_SYNC_DIAG:++ray_kwargs.ray_init.runtime_env.env_vars.DRKERNEL_SYNC_DIAG=$DRKERNEL_SYNC_DIAG} \
       trainer.remove_clip=$REMOVE_CLIP \
       trainer.rollout_data_dir=$ROLLOUT_DATA_DIR \
       trainer.validation_data_dir=$VALIDATION_DATA_DIR \

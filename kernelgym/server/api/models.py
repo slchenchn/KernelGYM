@@ -19,6 +19,7 @@ class EvaluationRequest(BaseModel):
     num_correct_trials: int = Field(default=5, ge=1, le=20, description="Number of correctness trials")
     num_perf_trials: int = Field(default=100, ge=1, le=1000, description="Number of performance trials")
     num_warmup: int = Field(default=3, ge=0, le=100, description="Number of warmup iterations")
+    perf_trim_count: int = Field(default=0, ge=0, le=50, description="Number of highest/lowest trials to trim from each end before computing mean")
     timeout: int = Field(default=300, ge=10, le=3600, description="Task timeout in seconds")
     priority: Priority = Field(default=Priority.NORMAL, description="Task priority")
     device_preference: Optional[str] = Field(default=None, description="Preferred GPU device")

@@ -16,6 +16,7 @@ class KernelSimpleTask:
     entry_point: str = "ModelNew"
     num_perf_trials: int = 100
     num_warmup: int = 3
+    perf_trim_count: int = 0
     timeout: int = 300
     device: str = "cuda:0"
     priority: str = "normal"

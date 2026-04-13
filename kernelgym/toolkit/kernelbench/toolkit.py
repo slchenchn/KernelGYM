@@ -117,11 +117,16 @@ class KernelBenchToolkit(Toolkit):
             if enable_profiling is None:
                 enable_profiling = settings.enable_profiling
 
+            num_warmup = getattr(task, "num_warmup", 3)
+            perf_trim_count = getattr(task, "perf_trim_count", 0)
+
             result = kernelbench_pipeline.eval_kernel_against_ref(
                 original_model_src=task.reference_code,
                 custom_model_src=task.kernel_code,
                 num_correct_trials=num_correct_trials,
                 num_perf_trials=task.num_perf_trials,
+                num_warmup=num_warmup,
+                perf_trim_count=perf_trim_count,
                 measure_performance=measure_performance,
                 verbose=False,
                 device=device,
@@ -140,6 +145,8 @@ class KernelBenchToolkit(Toolkit):
             reference_runtime = kernelbench_pipeline.eval_reference_only(
                 original_model_src=task.reference_code,
                 num_perf_trials=task.num_perf_trials,
+                num_warmup=num_warmup,
+                perf_trim_count=perf_trim_count,
                 verbose=False,
                 device=device,
                 entry_point=task.entry_point,
@@ -203,9 +210,14 @@ class KernelBenchToolkit(Toolkit):
                     f"[RefTiming] task={task.task_id} reference_backend={task.reference_backend}"
                 )
 
+            num_warmup = getattr(task, "num_warmup", 3)
+            perf_trim_count = getattr(task, "perf_trim_count", 0)
+
             ref_exec_result = kernelbench_pipeline.eval_reference_only(
                 original_model_src=task.reference_code,
                 num_perf_trials=task.num_perf_trials,
+                num_warmup=num_warmup,
+                perf_trim_count=perf_trim_count,
                 verbose=False,
                 device=device,
                 entry_point=task.entry_point,
@@ -290,12 +302,16 @@ class KernelBenchToolkit(Toolkit):
 
             run_correctness, enable_triton_detection, measure_performance = self._resolve_eval_flags(task)
             num_correct_trials = task.num_correct_trials if run_correctness else 0
+            num_warmup = getattr(task, "num_warmup", 3)
+            perf_trim_count = getattr(task, "perf_trim_count", 0)
 
             result = kernelbench_pipeline.eval_kernel_against_ref(
                 original_model_src=task.reference_code,
                 custom_model_src=task.kernel_code,
                 num_correct_trials=num_correct_trials,
                 num_perf_trials=task.num_perf_trials,
+                num_warmup=num_warmup,
+                perf_trim_count=perf_trim_count,
                 measure_performance=measure_performance,
                 verbose=False,
                 device=device,

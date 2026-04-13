@@ -19,8 +19,10 @@ Kernel 奖励管理器，专门用于 kernel code RL 训练
 
 from collections import defaultdict
 from datetime import datetime
-import torch
 import logging
+import os
+
+import torch
 
 from verl import DataProto
 from verl.utils.reward_score import default_compute_score
@@ -30,6 +32,15 @@ from verl.workers.reward_manager import register
 # @register("kernel")
 class AsyncKernelRewardManager:
     """Kernel 奖励管理器，集成 KernelServer 进行内核性能评估"""
+
+    @staticmethod
+    def _debug_logging_enabled() -> bool:
+        flag = os.environ.get("KERNELGYM_REWARD_MANAGER_DEBUG_LOGS", "")
+        return flag.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _debug_print(self, message: str) -> None:
+        if self._debug_logging_enabled():
+            print(message)
 
     def __init__(
         self,
@@ -239,7 +250,7 @@ class AsyncKernelRewardManager:
         
         already_print_data_sources = {}
         
-        print(f"[DEBUG] entry point in reward manager: {entry_point}")
+        self._debug_print(f"[DEBUG] entry point in reward manager: {entry_point}")
         
         # 使用计算函数进行评估
 
@@ -251,7 +262,7 @@ class AsyncKernelRewardManager:
             speedup = 0.0
 
         if speedup > self.reward_config.speedup_reward_upper_bound:
-            print(f"[DEBUG] speedup is anomaly large, re-execute the environment")
+            self._debug_print(f"[DEBUG] speedup is anomaly large, re-execute the environment")
             results = self.execute_env(response_str, ground_truth, entry_point, uuid, response_ids)
             speedup = results[0].get("speedup", 0.0)
 
@@ -288,10 +299,14 @@ class AsyncKernelRewardManager:
         reward_extra_info["status"] = status
         reward_extra_info["error"] = err_msg
         
-        print(f"[DEBUG] num_custom_kernel in reward manager: {num_custom_kernel}")
-        print(f"[DEBUG] num_total_kernels in reward manager: {num_total_kernels}")
-        print(f"[DEBUG] custom_kernel_cuda_time_in_profiling_us in reward manager: {custom_kernel_cuda_time_in_profiling_us}")
-        print(f"[DEBUG] total_kernel_run_time_in_profiling_us in reward manager: {total_kernel_run_time_in_profiling_us}")
+        self._debug_print(f"[DEBUG] num_custom_kernel in reward manager: {num_custom_kernel}")
+        self._debug_print(f"[DEBUG] num_total_kernels in reward manager: {num_total_kernels}")
+        self._debug_print(
+            f"[DEBUG] custom_kernel_cuda_time_in_profiling_us in reward manager: {custom_kernel_cuda_time_in_profiling_us}"
+        )
+        self._debug_print(
+            f"[DEBUG] total_kernel_run_time_in_profiling_us in reward manager: {total_kernel_run_time_in_profiling_us}"
+        )
         # new features
         reward_extra_info["num_custom_kernel"] = num_custom_kernel
         reward_extra_info["num_total_kernels"] = num_total_kernels

@@ -30,6 +30,20 @@ def _get_cached_reference_runtime(
     return _reference_cache.get(uuid, reference_code, is_valid)
 
 
+def _put_cached_reference_runtime(
+    uuid: Optional[str],
+    reference_code: str,
+    is_valid: bool,
+    runtime: Optional[float],
+) -> None:
+    if _reference_cache is None:
+        return
+    put = getattr(_reference_cache, "put", None)
+    if put is None:
+        return
+    put(uuid, reference_code, is_valid, runtime)
+
+
 def _validate_code(code: str, entry_point: str = "Model") -> Tuple[bool, str]:
     try:
         if not code:

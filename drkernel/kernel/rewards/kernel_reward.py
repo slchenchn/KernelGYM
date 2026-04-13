@@ -123,11 +123,17 @@ def compute_kernel_reward_batch(solution_strs: list, ground_truths: list, entry_
 
         num_perf_trials = getattr(reward_config, "num_perf_trials")
         num_correct_trials = getattr(reward_config, "num_correct_trials")
+        num_warmup = getattr(reward_config, "num_warmup", 3)
+        perf_trim_count = getattr(reward_config, "perf_trim_count", 0)
+        import sys
+        print(f"[REWARD_DEBUG] num_warmup={num_warmup} perf_trim_count={perf_trim_count} num_perf_trials={num_perf_trials}", file=sys.stderr, flush=True)
         enable_profiling = getattr(reward_config, "enable_profiling")
         verbose_errors = getattr(reward_config, "verbose_errors")
         detect_decoy_kernel = getattr(reward_config, "detect_decoy_kernel")
         reference_backend = getattr(reward_config, "reference_backend", "torch_compile")
-        
+        ref_cache_cfg = getattr(reward_config, "reference_cache", None)
+        use_ref_cache = bool(getattr(ref_cache_cfg, "enable", False)) if ref_cache_cfg else False
+
         for i, solution_str in enumerate(solution_strs):
             # reference_code = extract_reference_code(solution_str)
             reference_code = ground_truths[i]
@@ -136,20 +142,22 @@ def compute_kernel_reward_batch(solution_strs: list, ground_truths: list, entry_
 
             if uuids is not None:
                 uuid = uuids[i]
-            
 
-            
+
+
             tasks.append({
                 "reference_code": reference_code,
                 "kernel_code": kernel_code,
                 "entry_point": entry_point,
-                "use_reference_cache": False,
+                "use_reference_cache": use_ref_cache,
                 "uuid": uuid if uuids is not None else "",
                 "is_valid": is_valid,
                 "task_timeout": task_timeout,
                 "task_timeout_in_client": task_timeout_in_client,
                 "num_correct_trials": num_correct_trials,
                 "num_perf_trials": num_perf_trials,
+                "num_warmup": num_warmup,
+                "perf_trim_count": perf_trim_count,
                 "enable_profiling": enable_profiling,
                 "verbose_errors": verbose_errors,
                 "detect_decoy_kernel": detect_decoy_kernel,
@@ -181,7 +189,7 @@ def compute_kernel_reward_batch(solution_strs: list, ground_truths: list, entry_
         
         # 调用时传递 task_timeout
         results = loop.run_until_complete(
-            client.compute_batch_rewards(tasks, use_reference_cache=False, 
+            client.compute_batch_rewards(tasks, use_reference_cache=use_ref_cache,
                                        is_valid=is_valid, task_timeout=task_timeout, 
                                        task_timeout_in_client=task_timeout_in_client)
         )

@@ -1,6 +1,6 @@
 ---
 name: start-training
-description: Start a drkernel training run for this repository using the canonical launcher scripts and the repo's orchestrator script instead of hand-built SSH/tmux commands. Use when the user asks to launch or resume training on the two A800 nodes, with or without targeted environment overrides.
+description: Start a drkernel training run for this repository using the canonical launcher scripts and the repo's orchestrator script instead of hand-built SSH/tmux commands. Use when the user asks to launch or resume training on the currently configured training nodes, with or without targeted environment overrides.
 ---
 
 # Start Training
@@ -8,10 +8,10 @@ description: Start a drkernel training run for this repository using the canonic
 Use this skill when the user asks to start or resume a training run in this repository.
 
 The goal is to avoid hand-built orchestration commands. Prefer the repo's canonical startup script:
-[`drkernel/kernel/scripts/rl/start_training.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_training.sh)
+`drkernel/kernel/scripts/rl/start_training.sh`
 
 and the existing launcher scripts under:
-[`drkernel/kernel/scripts/rl`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl)
+`drkernel/kernel/scripts/rl`
 
 ## When To Use
 
@@ -40,12 +40,12 @@ If the startup script is too hardcoded for the requested launch, fix the script 
    - model path
    - dataset path
    - if resuming, the target `RUN_LOG_DIR` and checkpoint root
-3. Check whether the two A800 training nodes are already occupied.
+3. Check whether the currently configured training nodes are already occupied.
    - Look for an active training or eval cluster before launching a new one.
    - Do not assume a fresh launch will clean up an existing run.
    - If the nodes are occupied and the user intends to switch or relaunch, first use the repo's stop-training procedure:
-     - skill: [`skills/stop_training/SKILL.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/skills/stop_training/SKILL.md)
-     - canonical command: `bash skills/stop_training/scripts/stop_ray_training.sh`
+     - skill: `.agents/skills/stop_training/SKILL.md`
+     - canonical command: `bash .agents/skills/stop_training/scripts/stop_ray_training.sh`
 4. Use the canonical startup script.
    - Default form:
      ```bash
@@ -58,7 +58,7 @@ If the startup script is too hardcoded for the requested launch, fix the script 
      bash drkernel/kernel/scripts/rl/start_training.sh \
        --skip-reward \
        --train-script drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh \
-       --env RUN_LOG_DIR=/nfs/.../trloo-14b-hfsdp8-pytorch-eager.train...20260409-092519 \
+       --env RUN_LOG_DIR=<existing_run_log_dir> \
        --env REWARD_TASK_TIMEOUT=30
      ```
 6. Keep the training under tmux.
@@ -88,7 +88,8 @@ If the startup script is too hardcoded for the requested launch, fix the script 
 
 ## Repo-Specific Notes
 
-- The orchestrator script reads node and venv settings from [`infra_common.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_common.sh). Do not hardcode the training nodes in the skill workflow.
+- Current node, container, reward-endpoint, and transport facts belong in `SPEC.md`, not in this skill.
+- The orchestrator script reads the current training-target settings from `drkernel/kernel/scripts/rl/infra_common.sh`. Do not hardcode launch hosts, containers, or environment paths in this skill.
 - If a user request cannot be expressed with the current startup script flags, modify `start_training.sh` rather than falling back immediately to ad hoc SSH orchestration.
 - Resumed runs share the old run directory, so old log content and new log content will coexist. Use the new process pid and fresh config dump to distinguish the resumed run from historical log lines.
 - For live progress checks after launch, use the separate training-status skill.
@@ -115,6 +116,6 @@ Resume an old run and shorten reward timeout:
 bash drkernel/kernel/scripts/rl/start_training.sh \
   --skip-reward \
   --train-script drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh \
-  --env RUN_LOG_DIR=/nfs/.../trloo-14b-hfsdp8-pytorch-eager.train...20260409-092519 \
+  --env RUN_LOG_DIR=<existing_run_log_dir> \
   --env REWARD_TASK_TIMEOUT=30
 ```

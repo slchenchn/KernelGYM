@@ -26,7 +26,7 @@ Use this skill for live or recent training runs in this repository when the user
    - Do not infer run phase from a tmux pane or a short tail alone.
    - Search the full `main.log` for the latest `Initial validation metrics`, `Training Progress`, and `step:N` entries.
 2. Generate plots first.
-   - Use the canonical plotting entrypoint documented in [`INDEX.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/INDEX.md).
+   - Use the canonical plotting entrypoint documented in `INDEX.md`.
    - Generate training plots alongside log inspection, and eval plots too if `eval_results` exists.
 3. Verify completion state, not only activity.
    - Decide whether the current step truly completed or is only retrying, oversampling, or heartbeating.
@@ -60,6 +60,6 @@ Also state whether the run has made real new progress or is only active.
 
 ## Repo-Specific Notes
 
-- The canonical plotting entrypoint is indexed in [`INDEX.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/INDEX.md); do not hardcode superseded plotting scripts.
+- The canonical plotting entrypoint is indexed in `INDEX.md`; do not hardcode superseded plotting scripts.
 - If log routing is suspected to be noisy or incomplete, cross-check `trainer.log`, `rollout.log`, `reward.log`, and `vllm.log` before making a phase-level claim.
 - If the user asks for progress on a live training run, combine log evidence and plot evidence in the same answer.

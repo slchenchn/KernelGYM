@@ -1,0 +1,1 @@
+../KernelGYM/AGENTS.md

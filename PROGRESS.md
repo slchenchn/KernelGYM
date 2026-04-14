@@ -1,5 +1,227 @@
 # Progress
 
+## 8B two-node H20 training relaunched on `gz01-h20-03` + `gz01-h20-05` with verified IB transport — ACTIVE
+
+#### The initial two-node H20 launch used socket transport as a conservative fallback because the InfiniBand host view was mixed, but the user explicitly required IB, so the run was stopped, relaunched with `NCCL_NET=IB`, and then verified from Ray worker logs on both nodes instead of assuming that the env vars alone were enough
+
+##### Problem & Impact
+
+- The first two-node H20 launch was stable but intentionally used `NCCL_IB_DISABLE=1`, which did not satisfy the requirement to actually use InfiniBand.
+- The host state was still mixed:
+  - InfiniBand HCAs were `ACTIVE` / `LinkUp`
+  - host-level `ibs*` netdevs remained `DOWN`
+- `train_rl_common.sh` propagated `NCCL_NET` and `NCCL_IB_DISABLE` into Ray runtime env, but it did not yet propagate `NCCL_IB_HCA` or `NCCL_DEBUG_SUBSYS`, which made IB-targeted launch intent easier to lose across worker processes.
+
+##### Resolution
+
+- Stopped the socket-based two-node run cleanly by removing only the repo's current training tmux sessions and Ray processes on the head and worker containers.
+- Relaunched the same `16xH20` training job through the canonical startup script with:
+  - `TRAIN_NCCL_IB_DISABLE=0`
+  - `TRAIN_NCCL_NET=IB`
+  - `TRAIN_NCCL_DEBUG=INFO`
+  - `KERNELGYM_SERVER_URL=http://10.0.18.3:18112`
+  - `NNODES=2`
+  - `NCCL_DEBUG_SUBSYS=INIT,NET`
+- Verified the relaunch from worker-side Ray logs instead of only checking trainer config:
+  - head-node worker logs showed `Initialized NET plugin IB` and `Using network IB`
+  - `node5:/csl_verl` worker logs showed the same IB initialization on `mlx5_0:1` through `mlx5_3:1`
+- Updated [`drkernel/kernel/scripts/rl/train_rl_common.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/train_rl_common.sh) so future Ray runtime envs also carry `NCCL_IB_HCA` and `NCCL_DEBUG_SUBSYS`.
+
+##### Result & Current State
+
+- The active IB run directory is [`trloo-8b-hfsdp8-pytorch-eager.train.16xH20.reward.16x4090.run.20260413-231743`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp8-pytorch-eager.train.16xH20.reward.16x4090.run.20260413-231743).
+- The active head-node tmux session is [`train-8b-16xh20-ib`](/tmp/train-8b-16xh20-ib.log), with tee log [`/tmp/train-8b-16xh20-ib.log`](/tmp/train-8b-16xh20-ib.log).
+- `trainer.log` confirms `nnodes: 2`, `fsdp_size: 8`, `server_url: http://10.0.18.3:18112`, `NCCL_IB_DISABLE: 0`, and `NCCL_NET: IB`.
+- Ray worker logs on both nodes explicitly show:
+  - `NET/IB`
+  - `Initialized NET plugin IB`
+  - `Assigned NET plugin IB to comm`
+  - `Using network IB`
+- Ray still reports `2` active nodes and `16` total GPUs, and the run remains in distributed worker/model bring-up with no new NCCL failure signatures at the latest check.
+
+## Training infra split into shared helpers plus H20 and A800 profiles — COMPLETED
+
+#### The orchestration layer had started to accumulate current H20-specific defaults inside one shared infra file, but the repo still needs to support the older A800 training and eval environment without cloning the same helper logic into a second copy
+
+##### Problem & Impact
+
+- The current H20 bring-up changed training-node access, Python activation, reward-repo wiring, and NCCL defaults enough that leaving all of that hardcoded in one shared infra file would make the A800 flows harder to preserve.
+- Duplicating `infra_common.sh` into separate H20 and A800 versions would also duplicate the same command-routing, quoting, and Python-environment helper logic across startup and stop paths.
+- Harness docs still described the training entrypoints as if there were one implicit infra environment, which no longer matched the code layout.
+
+##### Resolution
+
+- Split the shared infra logic into [`drkernel/kernel/scripts/rl/infra_lib.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_lib.sh), which now holds the common execution helpers, Python environment prelude, and target-routing helpers.
+- Moved cluster-specific defaults into:
+  - [`drkernel/kernel/scripts/rl/infra_profiles/h20.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_profiles/h20.sh)
+  - [`drkernel/kernel/scripts/rl/infra_profiles/a800.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_profiles/a800.sh)
+- Reduced [`drkernel/kernel/scripts/rl/infra_common.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_common.sh) to a loader layer that selects `TRAIN_CLUSTER_PROFILE`, defaults to `h20`, and then composes the shared infra helpers with the chosen profile.
+- Updated [`drkernel/kernel/scripts/rl/start_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_training.sh) and [`.agents/skills/stop_training/scripts/stop_ray_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/.agents/skills/stop_training/scripts/stop_ray_training.sh) so both accept `--profile h20|a800`.
+- Decoupled reward-side repo wiring from training-side repo wiring so the reward startup path does not inherit the H20 training worktree path by accident.
+
+##### Result & Current State
+
+- The repo now supports both `h20` and `a800` training infra profiles without maintaining two copies of the orchestration helper layer.
+- The active default remains `h20`, which matches the current two-node H20 training environment.
+- The older A800 startup and checkpoint-eval paths can continue to load their own cluster defaults through the profile mechanism instead of relying on H20-specific values.
+- `SPEC.md` and `INDEX.md` were updated alongside the code so the harness files now describe the profile-based infra layout instead of implying a single hardcoded training environment.
+
+## 8B two-node H20 training launched on `gz01-h20-03` + `gz01-h20-05` with socket transport — SUPERSEDED
+
+#### The requested second H20 node lived behind `ssh node5` plus an extra `docker exec csl_verl`, the worker repo was behind the current training worktree, the existing reward relay only listened on `127.0.0.1`, and the IB state was ambiguous for NCCL because the Mellanox ports were `ACTIVE` while the OS-level `ibs*` interfaces were `DOWN`; the launch therefore needed repo sync, system-Python validation, a shared cross-node reward entrypoint, and a conservative socket-based NCCL path before starting the 16xH20 run
+
+##### Problem & Impact
+
+- The requested training topology changed from the current single-node H20 run to `node3 + node5`, but `node5` is only reachable through the physical host plus `docker exec csl_verl`, not as a directly usable peer container.
+- The `node5` worktree was on the correct branch name `vllm018` but behind the current head-node worktree, so relying on it as-is risked running a different startup path or missing the local vLLM 0.18.0 compatibility fixes.
+- Cross-node reward access could not use the existing head-node-local relay at `http://127.0.0.1:18111`, because the worker container on `node5` could not reach that listener or `http://10.0.18.3:18111`.
+- The H20 hosts exposed a mixed IB state:
+  - Mellanox `/sys/class/infiniband/*/ports/1/{state,phys_state}` showed `ACTIVE` / `LinkUp`
+  - the host-level `ibs*` network interfaces on both nodes were still `DOWN`
+- The repo stop-training helper was not safe to use on these shared nodes because it assumes a repo venv path and force-kills all visible GPU compute PIDs, which could affect unrelated workloads.
+
+##### Resolution
+
+- Validated the worker path through `ssh node5` and `docker exec csl_verl`, then confirmed the container is running in `host` network mode so `bond0` is visible inside the worker container.
+- Synced the training-critical worktree files from `gz01-h20-03` to `node5` with a tar-over-SSH copy, including:
+  - `infra_common.sh`
+  - `start_training.sh`
+  - the H20 launchers
+  - `train_rl_common.sh`
+  - `setup_env.sh`
+  - the local `vllm.lora.worker_manager.LoRAModel` fallback in `drkernel/verl/verl/utils/vllm/utils.py`
+- Reinstalled the vendored `drkernel/verl` checkout editable into the system Python on `node5` and revalidated `which python`, `sys.executable`, `VIRTUAL_ENV`, `verl`, `vllm`, `ray`, and `torch` from the worker container without using `.venv`.
+- Verified that the model path `/nfs/FM/chenshuailin/checkpoints/hkust-nlp/drkernel-8b-coldstart` and the repo-local train/val parquet files are present on both training nodes.
+- Reused the existing reward stack but switched the two-node training endpoint to the cross-node relay at `http://10.0.18.3:18112`, which is exposed by local `socat` on `gz01-h20-03` and reachable from both the head container and `node5:/csl_verl`.
+- Cleared only the repo's own old Ray/tmux sessions on the two training containers instead of using the unsafe shared-node kill-all helper.
+- Launched the run through the repo orchestrator with:
+  - `TRAIN_NCCL_IB_DISABLE=1`
+  - `KERNELGYM_SERVER_URL=http://10.0.18.3:18112`
+  - `NNODES=2`
+  - launcher `8b_trloo_hfsdp8_pytorch_eager.16xH20.sh`
+  - tmux session `train-8b-16xh20-socket`
+
+##### Result & Current State
+
+- The active two-node run directory is [`trloo-8b-hfsdp8-pytorch-eager.train.16xH20.reward.16x4090.run.20260413-230832`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp8-pytorch-eager.train.16xH20.reward.16x4090.run.20260413-230832).
+- The active head-node tmux session is [`train-8b-16xh20-socket`](/tmp/train-8b-16xh20-socket.log), with tee log [`/tmp/train-8b-16xh20-socket.log`](/tmp/train-8b-16xh20-socket.log).
+- `ray status --address=10.0.18.3:6379` now reports `2` active nodes and `16` total GPUs, with `16.0/16.0 GPU` reserved by placement groups during worker initialization.
+- The trainer config for this run confirms:
+  - `nnodes: 2`
+  - `fsdp_size: 8`
+  - `server_url: http://10.0.18.3:18112`
+  - `NCCL_IB_DISABLE: 1`
+  - `test_freq: 0`
+  - `val_before_train: False`
+- The worker container on `gz01-h20-05` is actively participating in bring-up and shows `8` `ray::WorkerDict.actor_rollout_init_model` GPU processes, each using about `2168 MiB`.
+- The run has passed Ray cluster bring-up, dataset loading, and distributed worker/model initialization. At the latest check, `Training Progress` had not yet appeared, so the run is still in early distributed startup rather than failed.
+
+## 8B single-node H20 training relaunched with relative data paths — SUPERSEDED
+
+#### The 8B launcher still assumed old absolute dataset paths and the retired two-node remote startup path, so it was converted to the current single-node H20 environment, patched for the current local vLLM stack, and relaunched locally in tmux with the reward relay on `127.0.0.1:18111`; the active configuration now skips validation and uses a larger PPO micro-token budget
+
+##### Problem & Impact
+
+- The 8B eager launcher still pointed at absolute dataset paths under the old shared-tree location instead of the new local copies downloaded into the current worktree.
+- The old startup path still assumed the retired two-node remote training cluster, which is not the current environment.
+- Local startup on this node initially failed repeatedly for environment reasons:
+  - `import verl` resolved to the outer namespace directory instead of the vendored package, so `DataProto` was missing.
+  - `scipy` was not installed, so `refresh_moderate_sampler.py` failed during import.
+  - The vendored `verl` code still imported `LoRAModel` from `vllm.lora.models`, but this node is running `vllm==0.18.0`, where that symbol is re-exported from `vllm.lora.worker_manager`.
+  - The host Python environment was also missing runtime packages that the code path now reaches on this node, specifically `tenacity` and `sandbox-fusion`.
+- After those startup issues were fixed, the active 8B configuration still performed validation, but the requested operating mode is to skip validation entirely and start training directly.
+
+##### Resolution
+
+- Updated [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh) so that:
+  - train/val parquet paths use relative paths under `drkernel/data/`
+  - the default reward URL is `http://127.0.0.1:18111`
+  - the default training hardware label is `8xH20`
+  - the default node count is `1`
+  - the script `cd`s into `drkernel/` so those relative paths resolve consistently
+- Updated [`drkernel/setup_env.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/setup_env.sh) to prepend `drkernel/verl` to `PYTHONPATH`, which fixes `import verl` for this repo checkout.
+- Installed `scipy` into the current Python environment after the training import path advanced far enough to expose that missing dependency.
+- Replaced the incompatible local `transformers 5.3.0` with `transformers==4.56.0`, which matches the repo setup expectation and restores `AutoModelForVision2Seq`.
+- Patched [`drkernel/verl/verl/utils/vllm/utils.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/verl/verl/utils/vllm/utils.py) to fall back to `vllm.lora.worker_manager.LoRAModel` when `vllm.lora.models` is absent, which restores compatibility with the current local `vllm==0.18.0`.
+- Installed the missing runtime packages `tenacity==8.2.3` and `sandbox-fusion`, both of which are already expected by the repo's requirements/setup flow.
+- Installed the vendored [`drkernel/verl`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/verl) checkout as an editable package with `python -m pip install --no-deps -e .`, so the system Python now resolves `verl` directly to the repo worktree.
+- Updated [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh) again so the default launch behavior now:
+  - skips initial validation with `VAL_BEFORE_TRAIN=False`
+  - disables periodic validation with `TEST_FREQ=0`
+  - increases `PPO_MICRO_TOKEN` from `8192` to `16384`
+- Split the 8B eager launcher into hardware-specific files:
+  - [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh)
+  - [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.16xA800.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.16xA800.sh)
+- Kept [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.sh) as a compatibility wrapper to the H20 launcher so older references do not break immediately.
+- Started the local Ray head and the 8B launcher inside tmux session `train-8b-h20-pytorch-eager` on `gz01-h20-03`, instead of using the old remote two-node launcher path.
+
+##### Result & Current State
+
+- The active 8B run directory is [`trloo-8b-hfsdp8-pytorch-eager.train.8xH20.reward.16x4090.run.20260413-115602`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp8-pytorch-eager.train.8xH20.reward.16x4090.run.20260413-115602).
+- The active local tee log is [`/tmp/train-8b-h20-pytorch-eager.log`](/tmp/train-8b-h20-pytorch-eager.log).
+- The active run is using:
+  - relative dataset paths `data/drkernel-rl-data/cuda_llm_rl_thinking_1025.parquet` and `data/drkernel-validation-data/validation_data_thinking.parquet`
+  - reward endpoint `http://127.0.0.1:18111`
+  - single-node `trainer.nnodes=1`
+  - `trainer.val_before_train=False`
+  - `trainer.test_freq=0`
+  - `actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384`
+- The run has progressed past configuration loading and into trainer initialization:
+  - Ray connected at `10.0.18.3:6379`
+  - trainer config confirms `test_freq: 0` and `val_before_train: False`
+  - the current relaunch has already progressed past the earlier `vllm.lora.models`, `tenacity`, and `sandbox_fusion` import failures and remains alive in tmux while the async vLLM stack continues initializing
+- An execution adjustment was required because the old `start_training.sh` path still targets the retired remote A800 nodes and could not be used as-is on this host; the workaround was a local tmux launch on the current H20 node, and that gap still exists in the old remote launcher path.
+
+## Single-node H20 cluster details and local training data refreshed — COMPLETED
+
+#### The repo's run-specific operating facts were still pinned to the old two-node A800 cluster and to dataset paths that do not exist on the new cloud training host, so the current cluster and local data state were re-validated and rewritten
+
+##### Problem & Impact
+
+- `SPEC.md` still described the previous `192.168.16.18` / `192.168.16.24` two-node A800 training cluster as if it were current.
+- The old dataset paths under `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM/drkernel/data/...` were not present on the new cloud training host.
+- Without refreshing those run-specific facts, follow-up launch work would continue to assume the wrong training topology, stale reward endpoint assumptions, and missing local parquet paths.
+
+##### Resolution
+
+- Verified the current cloud training host as `gz01-h20-03` with observed IPs `10.0.18.3` and `172.17.0.1`.
+- Verified the current training topology as a single node with `8 x NVIDIA H20` GPUs.
+- Re-checked the cloud-side reward relay and confirmed that `http://127.0.0.1:18111` is healthy and exposes `8` workers from `reward-39` plus `8` workers from `reward-40`.
+- Downloaded the current local training parquet from `hkust-nlp/drkernel-rl-data` and the validation parquet from `hkust-nlp/drkernel-validation-data` into the current worktree's `drkernel/data/` directory.
+- Updated [`SPEC.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/SPEC.md) to reflect the new single-node H20 cluster, the relay-based reward endpoint, the absence of the old data paths on this node, and the new local dataset copies.
+- Removed the stale old A800 training-node section from [`SPEC.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/SPEC.md) instead of preserving it as historical runbook material.
+
+##### Result & Current State
+
+- `SPEC.md` now contains only the current single-node H20 cloud environment facts and no longer keeps the retired two-node A800 training-node details.
+- Local dataset copies are now present at:
+  - [`drkernel/data/drkernel-rl-data/cuda_llm_rl_thinking_1025.parquet`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/data/drkernel-rl-data/cuda_llm_rl_thinking_1025.parquet)
+  - [`drkernel/data/drkernel-validation-data/validation_data_thinking.parquet`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/data/drkernel-validation-data/validation_data_thinking.parquet)
+- The train parquet is `399M` on disk and downloaded in about `27s`; the validation parquet is `96K` and downloaded in about `7s`, so download speed was acceptable on this node.
+- A small repo helper gap was encountered: `drkernel/kernel/scripts/preprocess/pull_from_hub.py` fails with its default empty `ignore_patterns` handling, so direct `huggingface_hub.snapshot_download(...)` was used as the temporary workaround for this fetch.
+
+## Cloud-side reward reachability validated through localhost relay — COMPLETED
+
+#### The cloud host cannot reach A's reward API by direct LAN IP, but it can reach the reward service through the reverse-SSH relay on `127.0.0.1:18111`, and that relay exposes the 4090 worker pool
+
+##### Problem & Impact
+
+- The older remote-reward handoff still treated `http://192.168.16.39:8111` as the cloud-side reward URL, but the newer operating procedure had already shifted to a reverse-SSH relay entrypoint on the cloud host.
+- Without validating the current cloud-side path directly on the host, training could still be pointed at a dead direct URL and fail to reach the reward service even though the relay path was healthy.
+
+##### Resolution
+
+- Verified the cloud host execution context on `gz01-h20-03` with `which python`, `sys.executable`, and `VIRTUAL_ENV`.
+- Tested `http://127.0.0.1:18111/health` and `http://127.0.0.1:18111/workers/status` from the cloud host.
+- Tested the older direct path `http://192.168.16.39:8111/{health,workers/status}` from the same host with an 8-second timeout.
+
+##### Result & Current State
+
+- `http://127.0.0.1:18111/health` returned `200 OK` on `2026-04-13T10:56:40Z` with reward service health data.
+- `http://127.0.0.1:18111/workers/status` returned `200 OK` and included multiple `reward-40_gpu_*` entries, confirming that the 4090 worker host is reachable behind the relay.
+- The direct cloud-to-A URL `http://192.168.16.39:8111` timed out for both `/health` and `/workers/status`, so it is not currently a valid cloud-side training endpoint.
+- The current cloud-host reward entrypoint should therefore be treated as `http://127.0.0.1:18111` unless and until container-network validation requires the bridge-container alternatives documented in the relay runbook.
+
 ## Remote training with local reward topology guidance — COMPLETED
 
 #### The current architecture already supports remote rollout/PPO with local reward via HTTP, so the immediate blocker is network reachability rather than a new standalone orchestrator
@@ -12,7 +234,7 @@
 ##### Resolution
 
 - Reviewed the current trainer, rollout, and reward-client boundaries.
-- Documented the conclusion in [`handoffs/in_progress/HANDOFF_REMOTE_TRAIN_LOCAL_REWARD.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/handoffs/in_progress/HANDOFF_REMOTE_TRAIN_LOCAL_REWARD.md).
+- Documented the conclusion in [`handoffs/completed/HANDOFF_REMOTE_TRAIN_LOCAL_REWARD.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/handoffs/completed/HANDOFF_REMOTE_TRAIN_LOCAL_REWARD.md).
 - Added repo-independent test methods for:
   - reward API reachability
   - reverse-tunnel validation

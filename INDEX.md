@@ -16,15 +16,30 @@
 ## Training Launchers
 
 - [`drkernel/kernel/scripts/rl/start_training.sh`](drkernel/kernel/scripts/rl/start_training.sh)
-  Canonical multi-node training startup entrypoint; use this instead of hand-built SSH/tmux launch commands.
+  Canonical multi-node training startup entrypoint; supports `--profile h20|a800` and should be used instead of hand-built SSH/tmux launch commands.
 - [`drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh`](drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh)
   Canonical 14B eager training launcher used as the current baseline.
 - [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh`](drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh)
   Current single-node H20 8B eager training launcher.
+- [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.16xH20.sh`](drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.16xH20.sh)
+  Current two-node H20 8B eager training launcher.
 - [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.16xA800.sh`](drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.16xA800.sh)
   Two-node A800 8B eager training launcher.
 - [`drkernel/kernel/scripts/rl/train_rl_common.sh`](drkernel/kernel/scripts/rl/train_rl_common.sh)
   Shared Hydra/config assembly for RL launches.
+
+## Training Infra And Orchestration
+
+- [`drkernel/kernel/scripts/rl/infra_common.sh`](drkernel/kernel/scripts/rl/infra_common.sh)
+  Infra compatibility loader; selects the active cluster profile and exposes shared orchestration defaults to the startup and stop scripts.
+- [`drkernel/kernel/scripts/rl/infra_lib.sh`](drkernel/kernel/scripts/rl/infra_lib.sh)
+  Shared shell helpers for local execution, `ssh` plus `docker exec` targets, Python environment prelude, and cluster-side command routing.
+- [`drkernel/kernel/scripts/rl/infra_profiles/h20.sh`](drkernel/kernel/scripts/rl/infra_profiles/h20.sh)
+  H20 training-cluster defaults used by the current active training environment.
+- [`drkernel/kernel/scripts/rl/infra_profiles/a800.sh`](drkernel/kernel/scripts/rl/infra_profiles/a800.sh)
+  A800 training-cluster defaults used by the legacy two-node training and eval environment.
+- [`.agents/skills/stop_training/scripts/stop_ray_training.sh`](.agents/skills/stop_training/scripts/stop_ray_training.sh)
+  Canonical stop entrypoint for repo-managed training clusters; supports `--profile h20|a800`.
 
 ## Monitoring, Logging, And Eval
 

@@ -8,7 +8,9 @@ REPO_ROOT="$(cd "${DRKERNEL_ROOT}/.." && pwd)"
 
 export DRKERNEL_ROOT
 export REPO_ROOT
-export PYTHONPATH="${DRKERNEL_ROOT}:${REPO_ROOT}:${PYTHONPATH:-}"
+# Put the vendored verl package root first so `import verl` resolves to
+# `drkernel/verl/verl/__init__.py` instead of the outer namespace directory.
+export PYTHONPATH="${DRKERNEL_ROOT}/verl:${DRKERNEL_ROOT}:${REPO_ROOT}:${PYTHONPATH:-}"
 
 # Common runtime defaults
 export PROJECT_NAME="${PROJECT_NAME:-drkernel}"

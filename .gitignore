@@ -3,6 +3,7 @@ data/
 __pycache__/
 logs/
 .env
+.infra_profile.local.sh
 SPEC.md
 outputs/
 wandb/

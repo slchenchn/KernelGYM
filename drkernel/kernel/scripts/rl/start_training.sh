@@ -36,7 +36,7 @@ Options:
 
 Defaults:
   --train-script  drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh
-  --profile       h20
+  --profile       TRAIN_CLUSTER_PROFILE / .infra_profile.local.sh / fallback h20
   --workdir       <VLLM018_PATH>/drkernel from the selected profile
   --tmux-session  derived from the launcher basename
   --local-log     /tmp/<tmux-session>.log
@@ -232,6 +232,7 @@ if [[ ! -f "$TRAIN_SCRIPT" ]]; then
 fi
 
 launcher_env=(
+    "TRAIN_CLUSTER_PROFILE=${TRAIN_CLUSTER_PROFILE}"
     "RAY_ADDRESS=${HEAD_NODE}:${RAY_HEAD_PORT}"
     "GLOO_SOCKET_IFNAME=${TRAIN_GLOO_SOCKET_IFNAME}"
     "NCCL_SOCKET_IFNAME=${TRAIN_NCCL_SOCKET_IFNAME}"

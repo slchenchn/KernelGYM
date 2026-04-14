@@ -3,6 +3,7 @@
 # Shared helpers live in infra_lib.sh; cluster-specific settings live in infra_profiles/.
 
 INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${INFRA_DIR}/../../../.." && pwd)"
 
 SUDO_PW="csl"
 REWARD_REPO_PATH="${REWARD_REPO_PATH:-/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018}"
@@ -14,7 +15,17 @@ REDIS_PORT="8110"
 REWARD_NODES=("192.168.16.39" "192.168.16.40")
 
 CONTAINER_IMAGE="192.168.14.129:80/fm/llmc:v1.1"
-TRAIN_CLUSTER_PROFILE="${TRAIN_CLUSTER_PROFILE:-h20}"
+
+# Optional untracked local overrides for machine-specific training profile defaults.
+# Use TRAIN_CLUSTER_PROFILE_LOCAL_DEFAULT in the local file so explicit CLI/env
+# TRAIN_CLUSTER_PROFILE still wins.
+LOCAL_INFRA_OVERRIDE_FILE="${LOCAL_INFRA_OVERRIDE_FILE:-${REPO_ROOT}/.infra_profile.local.sh}"
+if [[ -f "${LOCAL_INFRA_OVERRIDE_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    source "${LOCAL_INFRA_OVERRIDE_FILE}"
+fi
+
+TRAIN_CLUSTER_PROFILE="${TRAIN_CLUSTER_PROFILE:-${TRAIN_CLUSTER_PROFILE_LOCAL_DEFAULT:-h20}}"
 
 source "${INFRA_DIR}/infra_lib.sh"
 

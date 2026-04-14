@@ -5,8 +5,8 @@
 #   bash merge_and_eval_checkpoints.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TRAIN_CLUSTER_PROFILE="${TRAIN_CLUSTER_PROFILE:-a800}"
 source "${SCRIPT_DIR}/infra_common.sh"
+ENV_ACTIVATE_CMD="$(python_env_prelude)"
 
 CKPT_BASE="/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-refcache.train.16xA800.reward.16x4090.run.20260404-032344/checkpoints"
 RUN_DIR="$(dirname "${CKPT_BASE}")"
@@ -15,12 +15,6 @@ EVAL_SCRIPT_NAME="drkernel-14b-coldstart-maxturns3-temp1.0-w5t50trim.sh"
 mkdir -p "${RESULTS_DIR}"
 
 STEPS=(10 20 30 40 50 60 70 80 90 100 110 120 130 140 150 160 170)
-
-# Two training nodes for parallel eval
-NODE_A_HOST="192.168.16.18"
-NODE_A_PORT=20629
-NODE_B_HOST="192.168.16.24"
-NODE_B_PORT=14218
 
 # =============================================================================
 # Step 1: Merge all FSDP checkpoints to HF format
@@ -42,15 +36,14 @@ for i in "${!STEPS[@]}"; do
     fi
 done
 
-info "Node A (${NODE_A_HOST}): steps ${STEPS_A[*]}"
-info "Node B (${NODE_B_HOST}): steps ${STEPS_B[*]}"
+info "Node A ($(train_head_label)): steps ${STEPS_A[*]}"
+info "Node B ($(train_worker_label)): steps ${STEPS_B[*]}"
 
 # Function to merge, eval, then delete merged checkpoint on a node
 run_evals_on_node() {
-    local host=$1
-    local port=$2
-    local node_name=$3
-    shift 3
+    local runner=$1
+    local node_name=$2
+    shift 2
     local steps=("$@")
 
     for step in "${steps[@]}"; do
@@ -67,7 +60,8 @@ run_evals_on_node() {
         # Merge if needed
         if [ ! -f "${HF_DIR}/model.safetensors.index.json" ] && ! ls "${HF_DIR}"/model-*.safetensors >/dev/null 2>&1; then
             info "[${node_name}] Step ${step}: merging FSDP shards (CPU only)..."
-            ssh -p ${port} root@${host} "source ${VENV}/bin/activate && cd ${VLLM018_PATH}/drkernel && CUDA_VISIBLE_DEVICES='' PYTHONPATH=${VLLM018_PATH}/drkernel/verl:\$PYTHONPATH python3 -m verl.model_merger merge \
+            "${runner}" \
+                "${ENV_ACTIVATE_CMD} && cd ${VLLM018_PATH}/drkernel && CUDA_VISIBLE_DEVICES='' PYTHONPATH=${VLLM018_PATH}/drkernel/verl:\$PYTHONPATH python3 -m verl.model_merger merge \
                 --backend fsdp \
                 --use_cpu_initialization \
                 --local_dir '${CKPT_DIR}/actor' \
@@ -83,7 +77,8 @@ run_evals_on_node() {
         mkdir -p "${OUTPUT_DIR}"
         info "[${node_name}] Step ${step}: starting eval..."
 
-        ssh -p ${port} root@${host} "source ${VENV}/bin/activate && cd ${VLLM018_PATH}/drkernel && bash kernel/scripts/eval/${EVAL_SCRIPT_NAME} \
+        "${runner}" \
+            "${ENV_ACTIVATE_CMD} && cd ${VLLM018_PATH}/drkernel && bash kernel/scripts/eval/${EVAL_SCRIPT_NAME} \
             --model_path ${HF_DIR} \
             --model_name step_${step} \
             --output_path ${OUTPUT_DIR}/graded_results.parquet \
@@ -101,15 +96,16 @@ run_evals_on_node() {
         # Clean up: delete merged checkpoint + kill GPU processes
         info "[${node_name}] Step ${step}: cleaning up..."
         rm -rf "${HF_DIR}"
-        ssh -p ${port} root@${host} 'for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do kill -9 $p 2>/dev/null; done' 2>/dev/null
+        "${runner}" \
+            'for p in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do kill -9 $p 2>/dev/null; done' 2>/dev/null
         sleep 5
     done
 }
 
 # Launch both in parallel
-run_evals_on_node "${NODE_A_HOST}" "${NODE_A_PORT}" "nodeA" "${STEPS_A[@]}" &
+run_evals_on_node run_on_train_head "nodeA" "${STEPS_A[@]}" &
 PID_A=$!
-run_evals_on_node "${NODE_B_HOST}" "${NODE_B_PORT}" "nodeB" "${STEPS_B[@]}" &
+run_evals_on_node run_on_train_worker "nodeB" "${STEPS_B[@]}" &
 PID_B=$!
 
 info "Waiting for both nodes to finish..."

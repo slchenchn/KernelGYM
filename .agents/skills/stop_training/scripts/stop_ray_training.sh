@@ -30,6 +30,9 @@ while [[ $# -gt 0 ]]; do
             cat <<'USAGE'
 Usage:
   bash .agents/skills/stop_training/scripts/stop_ray_training.sh [--profile h20|a800]
+
+Profile resolution order:
+  --profile > TRAIN_CLUSTER_PROFILE > .infra_profile.local.sh > infra_common fallback
 USAGE
             exit 0
             ;;

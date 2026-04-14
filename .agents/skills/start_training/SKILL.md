@@ -32,6 +32,7 @@ If the startup script is too hardcoded for the requested launch, fix the script 
    - Examples:
      - `14b_coldstart_trloo_hfsdp8_pytorch_eager.sh`
      - `8b_trloo_hfsdp8_pytorch_eager.sh`
+   - Prefer the compatibility wrapper such as `8b_trloo_hfsdp8_pytorch_eager.sh` unless the user explicitly requests a pinned hardware-specific variant.
 2. Validate launch prerequisites from the head node before starting.
    - `which python`
    - `sys.executable`
@@ -51,6 +52,11 @@ If the startup script is too hardcoded for the requested launch, fix the script 
      ```bash
      bash drkernel/kernel/scripts/rl/start_training.sh \
        --train-script drkernel/kernel/scripts/rl/<launcher>.sh
+     ```
+   - Select hardware explicitly with `--profile` when the run should not use the worktree default.
+   - For a stable per-worktree default, use an untracked repo-root file `.infra_profile.local.sh` with:
+     ```bash
+     TRAIN_CLUSTER_PROFILE_LOCAL_DEFAULT=a800
      ```
 5. For resume or targeted launch changes, pass env overrides through `--env`.
    - Example:
@@ -73,6 +79,8 @@ If the startup script is too hardcoded for the requested launch, fix the script 
 
 - `--train-script PATH`
   - Selects the existing launcher script.
+- `--profile NAME`
+  - Selects the training cluster profile explicitly for this launch.
 - `--skip-reward`
   - Reuses the existing reward stack.
 - `-f` / `--force-reward`
@@ -90,6 +98,7 @@ If the startup script is too hardcoded for the requested launch, fix the script 
 
 - Current node, container, reward-endpoint, and transport facts belong in `SPEC.md`, not in this skill.
 - The orchestrator script reads the current training-target settings from `drkernel/kernel/scripts/rl/infra_common.sh`. Do not hardcode launch hosts, containers, or environment paths in this skill.
+- Prefer `.infra_profile.local.sh` or `--profile` over editing tracked default profile values in launcher or infra scripts.
 - If a user request cannot be expressed with the current startup script flags, modify `start_training.sh` rather than falling back immediately to ad hoc SSH orchestration.
 - Resumed runs share the old run directory, so old log content and new log content will coexist. Use the new process pid and fresh config dump to distinguish the resumed run from historical log lines.
 - For live progress checks after launch, use the separate training-status skill.
@@ -100,6 +109,7 @@ Fresh 14B eager launch:
 
 ```bash
 bash drkernel/kernel/scripts/rl/start_training.sh \
+  --profile a800 \
   --train-script drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh
 ```
 
@@ -107,6 +117,7 @@ Fresh 8B eager launch:
 
 ```bash
 bash drkernel/kernel/scripts/rl/start_training.sh \
+  --profile a800 \
   --train-script drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.sh
 ```
 

@@ -23,6 +23,7 @@ targets in `drkernel/kernel/scripts/rl/infra_common.sh`.
    - Do not infer run state from a local tmux pane alone.
 2. Stop the remote training cluster.
    - Run `bash .agents/skills/stop_training/scripts/stop_ray_training.sh`.
+   - Add `--profile` when the target differs from the worktree default selected by `.infra_profile.local.sh`.
 3. Verify the stop succeeded.
    - Remote GPUs should show no compute apps.
    - Remote `ray stop --force` should have removed the live cluster.
@@ -37,6 +38,12 @@ From the repo root:
 bash .agents/skills/stop_training/scripts/stop_ray_training.sh
 ```
 
+Explicit profile override:
+
+```bash
+bash .agents/skills/stop_training/scripts/stop_ray_training.sh --profile a800
+```
+
 ## What The Script Does
 
 - Sources the canonical training-target settings from `infra_common.sh`.
@@ -47,6 +54,7 @@ bash .agents/skills/stop_training/scripts/stop_ray_training.sh
 
 - Current node, container, and environment facts belong in `SPEC.md`, not in this skill.
 - Do not hardcode launch hosts, ports, containers, or environment paths in the workflow. Read them from `infra_common.sh`.
+- Prefer `.infra_profile.local.sh` or `--profile` over editing tracked default profile values in infra scripts.
 - The stop script should work with the current Python environment selection instead of assuming a repo venv.
 - If an orchestrator wraps remote work as `ssh ... | tail -n 20`, the tmux pane is not a live
   progress source. Check files, remote processes, and GPU state directly.

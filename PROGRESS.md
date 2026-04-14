@@ -1,5 +1,30 @@
 # Progress
 
+#### Local training profile selection moved to `.infra_profile.local.sh` and shared harness paths — COMPLETED
+
+##### Problem & Impact
+
+- Switching between A800 and H20 still depended on editing tracked default profile values in launcher or infra scripts, which is fragile across upstream pulls and noisy in local commits.
+- The first local-override implementation looked for `.infra_profile.local.sh` through `REWARD_REPO_PATH`, which can point at the old `/nfs/...` tree instead of the current worktree on H20, so the override was not reliably discovered.
+- Some adjacent harness paths still bypassed the profile loader entirely, including the checkpoint-eval helper and the training/stop skills, which left the profile-selection behavior inconsistent.
+
+##### Resolution
+
+- Changed [`drkernel/kernel/scripts/rl/infra_common.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_common.sh) to resolve `.infra_profile.local.sh` from the current repo root and keep precedence ordered as:
+  - explicit `--profile`
+  - `TRAIN_CLUSTER_PROFILE`
+  - `.infra_profile.local.sh`
+  - loader fallback
+- Added tracked example file [`.infra_profile.local.example.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/.infra_profile.local.example.sh) so each worktree can create an untracked local default without modifying tracked scripts.
+- Kept the 8B compatibility launcher profile-driven instead of hardware-default-driven, and updated the start/stop skills so they direct operators to use `--profile` or `.infra_profile.local.sh` rather than editing tracked defaults.
+- Updated [`drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) to load the active infra profile and run through the shared train-node helpers instead of hardcoded A800 SSH endpoints.
+
+##### Result & Current State
+
+- A worktree can now pin its default training hardware locally by creating `.infra_profile.local.sh`, while preserving explicit per-command overrides.
+- The start, stop, and checkpoint-eval harness paths now share the same profile-selection mechanism instead of each carrying their own hardcoded device default.
+- Future upstream pulls no longer require local tracked-file edits just to switch between A800 and H20 in this repo.
+
 #### 8B H20 training switched from `16xH20` two-node IB to `8xH20` single-node with oversampling `1.0` — ACTIVE
 
 ##### Problem & Impact

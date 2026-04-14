@@ -44,6 +44,7 @@ The repository's top-level harness files are the stable operational documents th
 4. Before launching training, verify that service endpoints, model paths, and dataset paths are reachable from the node that will use them.
 5. If environment or process-state issues block startup, record the exact blocking point and the minimal remediation.
 6. Do not proactively delete `__pycache__` directories during cleanup unless the user explicitly asks for that.
+7. When creating commits, use a commit message in `xx:yy` form.
 
 ## Execution Policy
 

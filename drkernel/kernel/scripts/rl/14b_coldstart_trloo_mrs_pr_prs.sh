@@ -2,34 +2,13 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRKERNEL_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-PROJECT_NAME="${PROJECT_NAME:-drkernel}"
-RUN_LOG_TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+source "${SCRIPT_DIR}/launcher_common.sh"
+
 LOG_RUN_PREFIX="${LOG_RUN_PREFIX:-trloo-14b}"
 TRAIN_LOG_HW="${TRAIN_LOG_HW:-8XA800}"
 REWARD_LOG_HW="${REWARD_LOG_HW:-16x4090}"
-RUN_LOG_PHASE="${RUN_LOG_PHASE:-run}"
-RUN_LOG_BASENAME="${RUN_LOG_BASENAME:-${LOG_RUN_PREFIX}.train.${TRAIN_LOG_HW}.reward.${REWARD_LOG_HW}.${RUN_LOG_PHASE}.${RUN_LOG_TIMESTAMP}}"
-RUN_LOG_DIR="${RUN_LOG_DIR:-${DRKERNEL_ROOT}/logs/${RUN_LOG_BASENAME}}"
-MAIN_LOG="${MAIN_LOG:-${RUN_LOG_DIR}/main.log}"
-TRAINER_LOG="${TRAINER_LOG:-${RUN_LOG_DIR}/trainer.log}"
-ROLLOUT_LOG="${ROLLOUT_LOG:-${RUN_LOG_DIR}/rollout.log}"
-REWARD_LOG="${REWARD_LOG:-${RUN_LOG_DIR}/reward.log}"
-VLLM_LOG="${VLLM_LOG:-${RUN_LOG_DIR}/vllm.log}"
-TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-${RUN_LOG_DIR}/torchinductor_cache}"
-
-if [ "${DRKERNEL_LOGGING_INITIALIZED:-0}" != "1" ]; then
-    mkdir -p "${RUN_LOG_DIR}/structured" "${TORCHINDUCTOR_CACHE_DIR}"
-    export DRKERNEL_LOGGING_INITIALIZED=1
-    export DRKERNEL_EVENT_LOG_DIR="${RUN_LOG_DIR}/structured"
-    export MAIN_LOG
-    export TRAINER_LOG
-    export ROLLOUT_LOG
-    export REWARD_LOG
-    export VLLM_LOG
-    export TORCHINDUCTOR_CACHE_DIR
-    echo "Logging training run to: ${MAIN_LOG}"
-    exec > >(python -u "${SCRIPT_DIR}/log_router.py") 2>&1
-fi
+init_launcher_run_state
+enable_launcher_log_router
 
 TRAIN_DATASET=("/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM/drkernel/data/drkernel-rl-data/cuda_llm_rl_thinking_1025.parquet")
 VALID_DATASET=("/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM/drkernel/data/drkernel-validation-data/validation_data_thinking.parquet")

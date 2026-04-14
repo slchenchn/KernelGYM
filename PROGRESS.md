@@ -1,6 +1,50 @@
 # Progress
 
-## 8B two-node H20 training relaunched on `gz01-h20-03` + `gz01-h20-05` with verified IB transport — ACTIVE
+#### 8B H20 training switched from `16xH20` two-node IB to `8xH20` single-node with oversampling `1.0` — ACTIVE
+
+##### Problem & Impact
+
+- The user asked to stop the active two-node `16xH20` 8B training run, relaunch on only the current node `gz01-h20-03`, and reduce oversampling to `1.0`.
+- The repo's canonical startup path could not express that request as-is because [`drkernel/kernel/scripts/rl/start_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_training.sh) always started the worker Ray node, which would have silently rebuilt a two-node cluster again.
+- The canonical stop path also had a repo-root bug: [`.agents/skills/stop_training/scripts/stop_ray_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/.agents/skills/stop_training/scripts/stop_ray_training.sh) walked up only three path levels from `.agents/skills/stop_training/scripts/`, so it resolved `.agents/drkernel/...` and failed before it could stop anything.
+
+##### Resolution
+
+- Fixed [`.agents/skills/stop_training/scripts/stop_ray_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/.agents/skills/stop_training/scripts/stop_ray_training.sh) to resolve `REPO_ROOT` correctly from the skill script path, then used it to stop the active H20 Ray cluster on both `gz01-h20-03` and `gz01-h20-05`.
+- Added single-node support to [`drkernel/kernel/scripts/rl/start_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_training.sh) with `--single-node`, automatic `NNODES=1` handling, and worker-start suppression so the canonical orchestrator can now launch a true head-only run instead of requiring ad hoc tmux/SSH commands.
+- Verified the launch-node environment and prerequisites before relaunch:
+  - `which python`: `/usr/bin/python`
+  - `sys.executable`: `/usr/bin/python`
+  - `VIRTUAL_ENV`: unset
+  - reward health: `http://127.0.0.1:18111/health`
+  - model path: `/nfs/FM/chenshuailin/checkpoints/hkust-nlp/drkernel-8b-coldstart`
+  - train/val parquet paths under `drkernel/data/`
+- Removed only the stale repo-managed Ray tmux sessions left behind by the stopped `16xH20` run and confirmed its `main.log` / `trainer.log` timestamps stopped moving.
+- Relaunched through the canonical startup script with:
+  - launcher: [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh)
+  - `--single-node`
+  - `--skip-reward`
+  - `--env PROMPT_OVERSAMPLING_FACTOR=1.0`
+  - `--env SAMPLE_OVERSAMPLING_FACTOR=1.0`
+  - tmux session `train-8b-8xh20-ovs1`
+  - tee log `/tmp/train-8b-8xh20-ovs1.log`
+
+##### Result & Current State
+
+- The active run directory is [`trloo-8b-hfsdp8-pytorch-eager.train.8xH20.reward.16x4090.run.20260414-021605`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp8-pytorch-eager.train.8xH20.reward.16x4090.run.20260414-021605).
+- The active head-node tmux session is [`train-8b-8xh20-ovs1`](/tmp/train-8b-8xh20-ovs1.log), with tee log [`/tmp/train-8b-8xh20-ovs1.log`](/tmp/train-8b-8xh20-ovs1.log).
+- `ray status --address=10.0.18.3:6379` now reports `1` active node and `8` total GPUs.
+- `trainer.log` confirms:
+  - `nnodes: 1`
+  - `prompt_oversampling_factor: 1.0`
+  - `sample_oversampling_factor: 1.0`
+  - `server_url: http://127.0.0.1:18111`
+  - `test_freq: 0`
+  - `val_before_train: False`
+- The old `16xH20` IB run at [`trloo-8b-hfsdp8-pytorch-eager.train.16xH20.reward.16x4090.run.20260413-231743`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp8-pytorch-eager.train.16xH20.reward.16x4090.run.20260413-231743) is stopped; its `main.log` and `trainer.log` both stopped updating at `2026-04-14 02:14:04 UTC`, and the old repo-managed Ray tmux sessions were removed.
+- The new run has already passed Ray bring-up, config load, dataset load, and actor/rollout worker initialization. At the latest check it had `8` local H20 GPUs reserved in Ray, `Training Progress: 0/4499000`, and `[RolloutProgress] step=1 ... phase=start` in `trainer.log`.
+
+## 8B two-node H20 training relaunched on `gz01-h20-03` + `gz01-h20-05` with verified IB transport — SUPERSEDED
 
 #### The initial two-node H20 launch used socket transport as a conservative fallback because the InfiniBand host view was mixed, but the user explicitly required IB, so the run was stopped, relaunched with `NCCL_NET=IB`, and then verified from Ray worker logs on both nodes instead of assuming that the env vars alone were enough
 

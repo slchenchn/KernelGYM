@@ -26,6 +26,7 @@ Options:
       --skip-reward            Reuse the existing reward stack instead of restarting it
       --train-script PATH      Training launcher script to run
       --profile NAME          Training cluster profile to load (e.g. h20, a800)
+      --single-node            Launch only on the head/current training node
       --tmux-session NAME      Remote head-node tmux session name
       --local-log PATH         Remote head-node tee log path
       --workdir PATH           Remote working directory before launch
@@ -55,6 +56,7 @@ USAGE
 FORCE_REWARD=0
 SKIP_REWARD=0
 DRY_RUN=0
+SINGLE_NODE=0
 TRAIN_SCRIPT="${SCRIPT_DIR}/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh"
 TMUX_SESSION=""
 LOCAL_LOG=""
@@ -93,6 +95,18 @@ sanitize_name() {
 
 shell_quote() {
     printf '%q' "$1"
+}
+
+get_env_override() {
+    local key="$1"
+    local kv
+    for kv in "${EXTRA_ENV[@]}"; do
+        if [[ "$kv" == "${key}="* ]]; then
+            printf '%s\n' "${kv#*=}"
+            return 0
+        fi
+    done
+    return 1
 }
 
 wait_for_ray_ready() {
@@ -138,6 +152,10 @@ while [[ $# -gt 0 ]]; do
             TRAIN_CLUSTER_PROFILE="$2"
             shift 2
             ;;
+        --single-node)
+            SINGLE_NODE=1
+            shift
+            ;;
         --tmux-session)
             [[ $# -ge 2 ]] || { error "--tmux-session requires a value"; exit 1; }
             TMUX_SESSION="$2"
@@ -178,6 +196,21 @@ done
 if [[ "$SKIP_REWARD" = "1" && "$FORCE_REWARD" = "1" ]]; then
     error "--skip-reward and --force-reward cannot be used together"
     exit 1
+fi
+
+requested_nnodes="$(get_env_override NNODES || true)"
+if [[ "$SINGLE_NODE" = "1" ]]; then
+    if [[ -n "${requested_nnodes}" && "${requested_nnodes}" != "1" ]]; then
+        error "--single-node conflicts with NNODES=${requested_nnodes}"
+        exit 1
+    fi
+    if [[ -z "${requested_nnodes}" ]]; then
+        EXTRA_ENV+=("NNODES=1")
+        requested_nnodes="1"
+    fi
+fi
+if [[ "${requested_nnodes}" == "1" ]]; then
+    SINGLE_NODE=1
 fi
 
 TRAIN_SCRIPT="$(resolve_path "$TRAIN_SCRIPT")"
@@ -232,6 +265,11 @@ if [[ "$DRY_RUN" = "1" ]]; then
     fi
     info "Training script: $TRAIN_SCRIPT"
     info "Cluster profile: ${TRAIN_CLUSTER_PROFILE}"
+    if [[ "$SINGLE_NODE" = "1" ]]; then
+        info "Topology: single node (${HEAD_NODE})"
+    else
+        info "Topology: head + worker (${HEAD_NODE} + ${WORKER_NODE})"
+    fi
     info "Workdir: $WORKDIR"
     info "tmux session: $TMUX_SESSION"
     info "local log: $LOCAL_LOG"
@@ -275,16 +313,20 @@ if [[ $head_rc -ne 0 ]]; then
     exit 1
 fi
 
-info "Starting Ray worker on $(train_worker_label)..."
-worker_start_cmd="${ENV_ACTIVATE_CMD} && cd $(shell_quote "$WORKDIR") && ray stop --force >/dev/null 2>&1 || true && ray start --address=${HEAD_NODE}:${RAY_HEAD_PORT} --num-gpus=8 >$(shell_quote "${WORKER_RAY_LOG}") 2>&1 && tail -f /dev/null"
-worker_output=$(run_on_train_worker \
-    "tmux kill-session -t $(shell_quote "${WORKER_RAY_SESSION}") 2>/dev/null || true; tmux new-session -d -s $(shell_quote "${WORKER_RAY_SESSION}") bash -lc $(shell_quote "${worker_start_cmd}")" 2>&1)
-worker_rc=$?
-[[ -n "$worker_output" ]] && echo "$worker_output" | tail -5
-if [[ $worker_rc -ne 0 ]]; then
-    error "Ray worker start failed (rc=${worker_rc})!"
-    echo "$worker_output"
-    exit 1
+if [[ "$SINGLE_NODE" != "1" ]]; then
+    info "Starting Ray worker on $(train_worker_label)..."
+    worker_start_cmd="${ENV_ACTIVATE_CMD} && cd $(shell_quote "$WORKDIR") && ray stop --force >/dev/null 2>&1 || true && ray start --address=${HEAD_NODE}:${RAY_HEAD_PORT} --num-gpus=8 >$(shell_quote "${WORKER_RAY_LOG}") 2>&1 && tail -f /dev/null"
+    worker_output=$(run_on_train_worker \
+        "tmux kill-session -t $(shell_quote "${WORKER_RAY_SESSION}") 2>/dev/null || true; tmux new-session -d -s $(shell_quote "${WORKER_RAY_SESSION}") bash -lc $(shell_quote "${worker_start_cmd}")" 2>&1)
+    worker_rc=$?
+    [[ -n "$worker_output" ]] && echo "$worker_output" | tail -5
+    if [[ $worker_rc -ne 0 ]]; then
+        error "Ray worker start failed (rc=${worker_rc})!"
+        echo "$worker_output"
+        exit 1
+    fi
+else
+    info "Single-node mode requested; skipping worker Ray startup."
 fi
 
 sleep 3
@@ -292,10 +334,12 @@ wait_for_ray_ready "Head" run_on_train_head "${HEAD_NODE}:${RAY_HEAD_PORT}" || {
     run_on_train_head "tail -n 80 $(shell_quote "${HEAD_RAY_LOG}")" || true
     exit 1
 }
-wait_for_ray_ready "Worker" run_on_train_worker "${HEAD_NODE}:${RAY_HEAD_PORT}" || {
-    run_on_train_worker "tail -n 80 $(shell_quote "${WORKER_RAY_LOG}")" || true
-    exit 1
-}
+if [[ "$SINGLE_NODE" != "1" ]]; then
+    wait_for_ray_ready "Worker" run_on_train_worker "${HEAD_NODE}:${RAY_HEAD_PORT}" || {
+        run_on_train_worker "tail -n 80 $(shell_quote "${WORKER_RAY_LOG}")" || true
+        exit 1
+    }
+fi
 GPU_COUNT=$(run_on_train_head \
     "${ENV_ACTIVATE_CMD} && ray status --address=${HEAD_NODE}:${RAY_HEAD_PORT} 2>/dev/null | grep GPU || true" 2>&1)
 info "Ray cluster: ${GPU_COUNT}"

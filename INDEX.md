@@ -16,7 +16,7 @@
 ## Training Launchers
 
 - [`drkernel/kernel/scripts/rl/start_training.sh`](drkernel/kernel/scripts/rl/start_training.sh)
-  Canonical multi-node training startup entrypoint; supports `--profile h20|a800` and should be used instead of hand-built SSH/tmux launch commands.
+  Canonical training startup entrypoint; supports `--profile h20|a800`, `--single-node`, and should be used instead of hand-built SSH/tmux launch commands.
 - [`drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh`](drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh)
   Canonical 14B eager training launcher used as the current baseline.
 - [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh`](drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh)

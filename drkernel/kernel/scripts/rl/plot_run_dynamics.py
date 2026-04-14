@@ -22,15 +22,12 @@ import argparse
 import json
 import math
 import re
-import sys
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 from matplotlib.ticker import MaxNLocator
-import numpy as np
 
 
 def parse_step_metrics(log_path: str) -> dict:
@@ -167,6 +164,13 @@ def plot_grouped_metrics(steps: dict, step_nums: list[int], output_dir: Path, ge
     for key in metric_keys:
         grouped_keys.setdefault(metric_group(key), []).append(key)
 
+    def plot_metric_series(ax, xs, ys):
+        if not ys:
+            return
+        ax.plot(xs, ys, alpha=0.8, linewidth=1)
+        if len(xs) <= 3:
+            ax.scatter(xs, ys, s=18, zorder=3)
+
     for group, keys in sorted(grouped_keys.items()):
         n_metrics = len(keys)
         ncols = min(3, n_metrics)
@@ -182,8 +186,7 @@ def plot_grouped_metrics(steps: dict, step_nums: list[int], output_dir: Path, ge
         flat_axes = axes.ravel()
         for ax, key in zip(flat_axes, keys):
             xs, ys = get_series_aligned(key)
-            if ys:
-                ax.plot(xs, ys, alpha=0.8, linewidth=1)
+            plot_metric_series(ax, xs, ys)
             ax.set_title(metric_axis_title(key, group), fontsize=9)
             ax.set_xlabel("Step")
             ax.set_ylabel("Value")
@@ -202,7 +205,7 @@ def plot_grouped_metrics(steps: dict, step_nums: list[int], output_dir: Path, ge
         print(f"Saved {destination_dir / filename}")
 
 
-def plot_training_dynamics(steps: dict, output_dir: str, include_legacy_curated: bool = False):
+def plot_training_dynamics(steps: dict, output_dir: str):
     """Generate training dynamics plots."""
     if not steps:
         print("No training steps found in log.")
@@ -231,418 +234,7 @@ def plot_training_dynamics(steps: dict, output_dir: str, include_legacy_curated:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     plot_grouped_metrics(steps, step_nums, output_dir, get_series_aligned, apply_integer_step_axis)
-
-    if not include_legacy_curated:
-        write_training_summary(steps, step_nums, output_dir)
-        return
-
-    # =========================================================================
-    # Figure 1: Core Training Metrics (2x3)
-    # =========================================================================
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle("Training Dynamics — Core Metrics", fontsize=14, fontweight="bold")
-
-    # 1. Actor Loss
-    ax = axes[0, 0]
-    xs, ys = get_series_aligned("actor/loss")
-    if ys:
-        ax.plot(xs, ys, "b-", alpha=0.7, linewidth=0.8)
-        # Smoothed
-        if len(ys) > 5:
-            window = min(5, len(ys) // 3)
-            smoothed = np.convolve(ys, np.ones(window) / window, mode="valid")
-            ax.plot(xs[window - 1:], smoothed, "b-", linewidth=2, label=f"smooth(w={window})")
-            ax.legend(fontsize=8)
-    ax.set_title("Actor Loss")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.grid(True, alpha=0.3)
-
-    # 2. Reward Mean
-    ax = axes[0, 1]
-    xs, ys = get_series_aligned("critic/rewards/mean")
-    if ys:
-        ax.plot(xs, ys, "g-", alpha=0.7, linewidth=0.8)
-        if len(ys) > 5:
-            window = min(5, len(ys) // 3)
-            smoothed = np.convolve(ys, np.ones(window) / window, mode="valid")
-            ax.plot(xs[window - 1:], smoothed, "g-", linewidth=2)
-    ax.set_title("Reward Mean")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.grid(True, alpha=0.3)
-
-    # 3. KL Divergence
-    ax = axes[0, 2]
-    xs, ys = get_series_aligned("actor/kl_divergence")
-    if ys:
-        ax.plot(xs, ys, "r-", alpha=0.7, linewidth=0.8)
-    ax.set_title("KL Divergence")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.grid(True, alpha=0.3)
-
-    # 4. Clip Fraction
-    ax = axes[1, 0]
-    for key, color, label in [
-        ("actor/clip_fraction", "purple", "total"),
-        ("actor/clip_fraction_lower", "blue", "lower"),
-        ("actor/clip_fraction_upper", "red", "upper"),
-    ]:
-        xs, ys = get_series_aligned(key)
-        if ys:
-            ax.plot(xs, ys, color=color, alpha=0.7, linewidth=0.8, label=label)
-    ax.set_title("Clip Fraction")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # 5. Response Length
-    ax = axes[1, 1]
-    xs, ys = get_series_aligned("response_length/mean")
-    if ys:
-        ax.plot(xs, ys, "orange", alpha=0.7, linewidth=1)
-    ax.set_title("Response Length (mean)")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.grid(True, alpha=0.3)
-
-    # 6. Entropy
-    ax = axes[1, 2]
-    xs, ys = get_series_aligned("actor/avg_entropy")
-    if ys:
-        ax.plot(xs, ys, "teal", alpha=0.7, linewidth=1)
-    ax.set_title("Actor Entropy")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    fig.savefig(output_dir / "01_core_metrics.png", dpi=150)
-    plt.close(fig)
-    print(f"Saved 01_core_metrics.png")
-
-    # =========================================================================
-    # Figure 2: Kernel-Specific Metrics (2x3)
-    # =========================================================================
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle("Training Dynamics — Kernel Metrics", fontsize=14, fontweight="bold")
-
-    # 1. Per-turn correctness rate
-    ax = axes[0, 0]
-    for turn in [1, 2, 3]:
-        xs, ys = get_series_aligned(f"train/kernel/turn_{turn}/correctness_rate")
-        if ys:
-            ax.plot(xs, ys, alpha=0.7, linewidth=0.8, label=f"turn {turn}")
-    ax.set_title("Correctness Rate (per turn)")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # 2. Per-turn compilation rate
-    ax = axes[0, 1]
-    for turn in [1, 2, 3]:
-        xs, ys = get_series_aligned(f"train/kernel/turn_{turn}/compilation_rate")
-        if ys:
-            ax.plot(xs, ys, alpha=0.7, linewidth=0.8, label=f"turn {turn}")
-    ax.set_title("Compilation Rate (per turn)")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # 3. Speedup positive rate
-    ax = axes[0, 2]
-    xs, ys = get_series_aligned("critic/rewards_extra/is_speedup_positive/mean")
-    if ys:
-        ax.plot(xs, ys, "green", alpha=0.7, linewidth=0.8)
-    ax.set_title("Speedup Positive Rate")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.grid(True, alpha=0.3)
-
-    # 4. Performance (mean in all)
-    ax = axes[1, 0]
-    for turn in [1, 2, 3]:
-        xs, ys = get_series_aligned(f"train/kernel/turn_{turn}/mean_performance_in_all")
-        if ys:
-            ax.plot(xs, ys, alpha=0.7, linewidth=0.8, label=f"turn {turn}")
-    ax.set_title("Mean Performance (in all, per turn)")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # 5. Decoy kernel rate
-    ax = axes[1, 1]
-    xs, ys = get_series_aligned("critic/rewards_extra/is_decoy_kernel/mean")
-    if ys:
-        ax.plot(xs, ys, "red", alpha=0.7, linewidth=0.8)
-    ax.set_title("Decoy Kernel Rate")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.grid(True, alpha=0.3)
-
-    # 6. Coverage
-    ax = axes[1, 2]
-    xs, ys = get_series_aligned("coverage/coverage_rs_mean_coverage")
-    if ys:
-        ax.plot(xs, ys, "purple", alpha=0.7, linewidth=0.8)
-    ax.set_title("Mean Coverage")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    fig.savefig(output_dir / "02_kernel_metrics.png", dpi=150)
-    plt.close(fig)
-    print(f"Saved 02_kernel_metrics.png")
-
-    # =========================================================================
-    # Figure 3: Timing & Efficiency (1x3)
-    # =========================================================================
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle("Training Dynamics — Timing & Efficiency", fontsize=14, fontweight="bold")
-
-    # 1. Step timing breakdown
-    ax = axes[0]
-    for key, label, color in [
-        ("timing_s/gen", "rollout", "blue"),
-        ("timing_s/update_actor", "update_actor", "red"),
-        ("timing_s/old_log_prob", "ref_logprob", "green"),
-        ("timing_s/step", "total", "black"),
-    ]:
-        xs, ys = get_series_aligned(key)
-        if ys:
-            ys_min = [v / 60 for v in ys]  # convert to minutes
-            ax.plot(xs, ys_min, color=color, alpha=0.7, linewidth=1, label=label)
-    ax.set_title("Step Timing (minutes)")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Minutes")
-    apply_integer_step_axis(ax)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # 2. Batch size after filtering
-    ax = axes[1]
-    xs, ys = get_series_aligned("batch/effective_batch_size")
-    if ys:
-        ax.plot(xs, ys, "orange", alpha=0.7, linewidth=1)
-    ax.set_title("Effective Batch Size")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.grid(True, alpha=0.3)
-
-    # 3. Mismatch KL (policy drift)
-    ax = axes[2]
-    xs, ys = get_series_aligned("mismatch/mismatch_kl")
-    if ys:
-        ax.plot(xs, ys, "red", alpha=0.7, linewidth=1)
-    ax.set_title("Mismatch KL (policy drift)")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    fig.savefig(output_dir / "03_timing_efficiency.png", dpi=150)
-    plt.close(fig)
-    print(f"Saved 03_timing_efficiency.png")
-
-    # =========================================================================
-    # Figure 4: Mismatch Rejection Sampling Metrics (2x3)
-    # =========================================================================
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-    fig.suptitle("Training Dynamics — MRS Metrics", fontsize=14, fontweight="bold")
-
-    # 1. Token / sequence masking from rollout RS
-    ax = axes[0, 0]
-    for key, color, label in [
-        ("mismatch/rollout_rs_masked_fraction", "red", "token masked"),
-        ("mismatch/rollout_rs_seq_masked_fraction", "orange", "seq masked"),
-    ]:
-        xs, ys = get_series_aligned(key)
-        if ys:
-            ax.plot(xs, ys, color=color, alpha=0.75, linewidth=1, label=label)
-    ax.set_title("MRS Masked Fraction")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Fraction")
-    apply_integer_step_axis(ax)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # 2. Final mask rate by correctness after MRS + coverage RS
-    ax = axes[0, 1]
-    for key, color, label in [
-        ("mismatch_quality/correct/mask_rate", "red", "correct"),
-        ("mismatch_quality/incorrect/mask_rate", "gray", "incorrect"),
-        ("mismatch_quality/overall_mask_rate", "black", "overall"),
-    ]:
-        xs, ys = get_series_aligned(key)
-        if ys:
-            ax.plot(xs, ys, color=color, alpha=0.75, linewidth=1, label=label)
-    ax.set_title("Final Mask Rate by Quality")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Fraction")
-    apply_integer_step_axis(ax)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # 3. Correct samples that survive all masking
-    ax = axes[0, 2]
-    xs, ys = get_series_aligned("mismatch_quality/non_masked/correct_count")
-    if ys:
-        ax.plot(xs, ys, "green", alpha=0.75, linewidth=1)
-    ax.set_title("Surviving Correct Samples")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Count")
-    apply_integer_step_axis(ax)
-    ax.grid(True, alpha=0.3)
-
-    # 4. Coverage RS pressure on correct samples, shown alongside MRS
-    ax = axes[1, 0]
-    for key, color, label in [
-        ("coverage/coverage_rs_correct_only_masked_fraction", "purple", "correct masked by coverage"),
-        ("coverage/coverage_rs_masked_fraction", "blue", "overall coverage masked"),
-    ]:
-        xs, ys = get_series_aligned(key)
-        if ys:
-            ax.plot(xs, ys, color=color, alpha=0.75, linewidth=1, label=label)
-    ax.set_title("Coverage RS Masking")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Fraction")
-    apply_integer_step_axis(ax)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # 5. Mismatch diagnostics
-    ax = axes[1, 1]
-    for key, color, label in [
-        ("mismatch/mismatch_kl", "red", "KL"),
-        ("mismatch/mismatch_log_ppl_abs_diff", "blue", "abs log-ppl diff"),
-    ]:
-        xs, ys = get_series_aligned(key)
-        if ys:
-            ax.plot(xs, ys, color=color, alpha=0.75, linewidth=1, label=label)
-    ax.set_title("Mismatch Diagnostics")
-    ax.set_xlabel("Step")
-    apply_integer_step_axis(ax)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # 6. Batch selection pressure
-    ax = axes[1, 2]
-    for key, color, label in [
-        ("batch/complete_groups_before_selection", "blue", "complete groups before"),
-        ("batch/complete_groups_after_selection", "green", "complete groups after"),
-        ("batch/low_variance_groups", "orange", "low variance groups"),
-    ]:
-        xs, ys = get_series_aligned(key)
-        if ys:
-            ax.plot(xs, ys, color=color, alpha=0.75, linewidth=1, label=label)
-    ax.set_title("Batch Selection Pressure")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Groups")
-    apply_integer_step_axis(ax)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    fig.savefig(output_dir / "04_mrs_metrics.png", dpi=150)
-    plt.close(fig)
-    print(f"Saved 04_mrs_metrics.png")
-
-    # =========================================================================
-    # Figure 5: Validation metrics (if available)
-    # =========================================================================
-    # Check if val metrics exist
-    val_keys = [k for k in steps[step_nums[0]].keys() if k.startswith("val/")]
-    if val_keys:
-        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-        fig.suptitle("Validation Metrics", fontsize=14, fontweight="bold")
-
-        ax = axes[0]
-        for key in ["val/test_score/kernelbench_level2_validation_pass@1",
-                     "val/test_score/kernelbench_level2_validation_pass@8"]:
-            xs, ys = get_series_aligned(key)
-            if ys:
-                label = "pass@1" if "pass@1" in key else "pass@8"
-                ax.plot(xs, ys, alpha=0.7, linewidth=1.5, label=label, marker="o", markersize=3)
-        ax.set_title("Validation pass@k")
-        ax.set_xlabel("Step")
-        apply_integer_step_axis(ax)
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
-
-        ax = axes[1]
-        xs, ys = get_series_aligned("val/test_score/kernelbench_level2_validation")
-        if ys:
-            ax.plot(xs, ys, "green", alpha=0.7, linewidth=1.5, marker="o", markersize=3)
-        ax.set_title("Validation Score")
-        ax.set_xlabel("Step")
-        apply_integer_step_axis(ax)
-        ax.grid(True, alpha=0.3)
-
-        ax = axes[2]
-        xs, ys = get_series_aligned("val/test_score_extra/correctness_kernelbench_level2_validation")
-        if ys:
-            ax.plot(xs, ys, "blue", alpha=0.7, linewidth=1.5, marker="o", markersize=3)
-        ax.set_title("Validation Correctness")
-        ax.set_xlabel("Step")
-        apply_integer_step_axis(ax)
-        ax.grid(True, alpha=0.3)
-
-        plt.tight_layout()
-        fig.savefig(output_dir / "05_validation.png", dpi=150)
-        plt.close(fig)
-        print(f"Saved 05_validation.png")
-
-    # =========================================================================
-    # Summary text
-    # =========================================================================
-    last_step = step_nums[-1]
-    last = steps[last_step]
-    summary = f"""Training Dynamics Summary
-========================
-Steps completed: {last_step}
-Total steps logged: {len(step_nums)}
-
-Latest metrics (step {last_step}):
-  actor/loss:          {last.get('actor/loss', 'N/A')}
-  reward mean:         {last.get('critic/rewards/mean', 'N/A')}
-  kl_divergence:       {last.get('actor/kl_divergence', 'N/A')}
-  clip_fraction:       {last.get('actor/clip_fraction', 'N/A')}
-  response_length:     {last.get('response_length/mean', 'N/A')}
-  entropy:             {last.get('actor/avg_entropy', 'N/A')}
-
-Kernel metrics (step {last_step}):
-  turn 1 correct:      {last.get('train/kernel/turn_1/correctness_rate', 'N/A')}
-  turn 2 correct:      {last.get('train/kernel/turn_2/correctness_rate', 'N/A')}
-  turn 3 correct:      {last.get('train/kernel/turn_3/correctness_rate', 'N/A')}
-  turn 1 compile:      {last.get('train/kernel/turn_1/compilation_rate', 'N/A')}
-  speedup positive:    {last.get('critic/rewards_extra/is_speedup_positive/mean', 'N/A')}
-  decoy rate:          {last.get('critic/rewards_extra/is_decoy_kernel/mean', 'N/A')}
-
-Timing (step {last_step}):
-  gen (rollout):       {last.get('timing_s/gen', 0)/60:.1f} min
-  update_actor:        {last.get('timing_s/update_actor', 0)/60:.1f} min
-  old_log_prob:        {last.get('timing_s/old_log_prob', 0)/60:.1f} min
-  total step:          {last.get('timing_s/step', 0)/60:.1f} min
-
-MRS / masking (step {last_step}):
-  mrs token masked:    {last.get('mismatch/rollout_rs_masked_fraction', 'N/A')}
-  mrs seq masked:      {last.get('mismatch/rollout_rs_seq_masked_fraction', 'N/A')}
-  correct mask rate:   {last.get('mismatch_quality/correct/mask_rate', 'N/A')}
-  incorrect mask rate: {last.get('mismatch_quality/incorrect/mask_rate', 'N/A')}
-  surviving correct:   {last.get('mismatch_quality/non_masked/correct_count', 'N/A')}
-  coverage correct RS: {last.get('coverage/coverage_rs_correct_only_masked_fraction', 'N/A')}
-"""
-    summary_path = output_dir / "training_summary.txt"
-    with open(summary_path, "w") as f:
-        f.write(summary)
-    print(summary)
-    print(f"Saved training_summary.txt")
+    write_training_summary(steps, step_nums, output_dir)
 
 
 
@@ -878,11 +470,6 @@ def main():
     parser.add_argument("--eval-output-dir", help="Optional shared eval plot output directory; defaults to each eval_results/plots")
     parser.add_argument("--skip-eval", action="store_true", help="Skip eval_results discovery and plotting")
     parser.add_argument("--eval-steps", nargs="+", type=int, help="Optional explicit checkpoint-eval step list")
-    parser.add_argument(
-        "--legacy-curated",
-        action="store_true",
-        help="Also emit the older curated training multi-metric figures.",
-    )
     parser.add_argument("--ref-fast1", type=float, default=0.4038, help="drkernel-14b (RL) turn_3 fast@1 reference")
     parser.add_argument("--ref-fast12", type=float, default=0.2400, help="drkernel-14b (RL) turn_3 fast@1.2 reference")
     args = parser.parse_args()
@@ -898,7 +485,7 @@ def main():
         print(f"Parsing training log {log_path}...")
         steps = parse_step_metrics(str(log_path))
         print(f"Found {len(steps)} training steps")
-        plot_training_dynamics(steps, str(output_dir), include_legacy_curated=args.legacy_curated)
+        plot_training_dynamics(steps, str(output_dir))
         print(f"Training plots saved to {output_dir}")
         plotted_training = True
     elif run_dir is not None:

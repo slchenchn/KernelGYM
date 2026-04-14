@@ -5,10 +5,21 @@
 #   bash merge_and_eval_checkpoints.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for ((i=1; i<=$#; i++)); do
+    if [[ "${!i}" == "--profile" ]]; then
+        next=$((i + 1))
+        if (( next > $# )); then
+            echo "[ERROR] --profile requires a value" >&2
+            exit 1
+        fi
+        TRAIN_CLUSTER_PROFILE="${!next}"
+    fi
+done
+TRAIN_CLUSTER_PROFILE="${TRAIN_CLUSTER_PROFILE:-a800}"
 source "${SCRIPT_DIR}/infra_common.sh"
 ENV_ACTIVATE_CMD="$(python_env_prelude)"
 
-CKPT_BASE="/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-refcache.train.16xA800.reward.16x4090.run.20260404-032344/checkpoints"
+CKPT_BASE="${CKPT_BASE:-/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-refcache.train.16xA800.reward.16x4090.run.20260404-032344/checkpoints}"
 RUN_DIR="$(dirname "${CKPT_BASE}")"
 RESULTS_DIR="${RUN_DIR}/eval_results"
 EVAL_SCRIPT_NAME="drkernel-14b-coldstart-maxturns3-temp1.0-w5t50trim.sh"

@@ -1,5 +1,26 @@
 # Progress
 
+#### A800 local-profile follow-up regressions were fixed in the eval helper and 8B launcher guardrails — COMPLETED
+
+##### Problem & Impact
+
+- The first A800-side local-profile changes introduced two mismatches in tracked harness behavior.
+- [`drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) started inheriting the worktree default profile from `infra_common.sh` even though its checkpoint source still points at a fixed A800 run, which meant a plain invocation on an H20-default worktree would silently target the wrong training nodes.
+- [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.sh) accepted `TRAIN_CLUSTER_PROFILE=a800` together with `NNODES=1` or `--single-node` and still resolved to the `16xA800` launcher, so the compatibility wrapper could hide an unsupported topology mismatch instead of rejecting it.
+
+##### Resolution
+
+- Restored an explicit A800 default in [`drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) before `infra_common.sh` is loaded, while keeping explicit `--profile` and `TRAIN_CLUSTER_PROFILE` overrides intact.
+- Made the checkpoint root overrideable with `CKPT_BASE=...` so the helper no longer requires an edit to the tracked script when a different run should be evaluated.
+- Added a hard validation in [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.sh) so `TRAIN_CLUSTER_PROFILE=a800` now errors unless `NNODES=2`.
+- Added the same incompatibility guard to [`drkernel/kernel/scripts/rl/start_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_training.sh) for the generic 8B wrapper, so `--single-node --profile a800` fails during startup preflight instead of only failing later inside tmux.
+
+##### Result & Current State
+
+- The checkpoint-eval helper once again preserves its historical A800 default behavior on a fresh worktree while still allowing explicit profile or path overrides.
+- The generic 8B launcher no longer silently maps unsupported `a800 + single-node` requests onto the `16xA800` two-node launcher.
+- `start_training.sh --dry-run --profile a800 --single-node --train-script drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.sh` now exits with a clear validation error instead of printing a misleading launch plan.
+
 #### Local training profile selection moved to `.infra_profile.local.sh` and shared harness paths — COMPLETED
 
 ##### Problem & Impact

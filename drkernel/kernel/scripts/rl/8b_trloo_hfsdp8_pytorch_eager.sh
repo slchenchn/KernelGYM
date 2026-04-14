@@ -31,6 +31,10 @@ if [[ -n "${TRAIN_LAUNCH_VARIANT:-}" ]]; then
 else
     case "${TRAIN_CLUSTER_PROFILE}" in
         a800)
+            if [[ -n "${NNODES:-}" && "${NNODES}" != "2" ]]; then
+                echo "[ERROR] TRAIN_CLUSTER_PROFILE=a800 only supports the 16xA800 two-node launcher; got NNODES=${NNODES}" >&2
+                exit 1
+            fi
             variant="16xA800"
             ;;
         h20)

@@ -216,8 +216,14 @@ fi
 TRAIN_SCRIPT="$(resolve_path "$TRAIN_SCRIPT")"
 WORKDIR="$(resolve_path "$WORKDIR")"
 ENV_ACTIVATE_CMD="$(python_env_prelude)"
+resolved_script_base="$(basename "$TRAIN_SCRIPT")"
 
-script_base="$(basename "$TRAIN_SCRIPT")"
+if [[ "$SINGLE_NODE" = "1" && "${TRAIN_CLUSTER_PROFILE}" = "a800" && "${resolved_script_base}" = "8b_trloo_hfsdp8_pytorch_eager.sh" ]]; then
+    error "--single-node is not supported for ${resolved_script_base} with TRAIN_CLUSTER_PROFILE=a800; use the 16xA800 two-node launcher/profile"
+    exit 1
+fi
+
+script_base="${resolved_script_base}"
 script_name="$(sanitize_name "$script_base")"
 TMUX_SESSION="${TMUX_SESSION:-train-${script_name}}"
 LOCAL_LOG="${LOCAL_LOG:-/tmp/${TMUX_SESSION}.log}"

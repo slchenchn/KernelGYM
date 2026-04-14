@@ -5,6 +5,7 @@
 #   bash merge_and_eval_checkpoints.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TRAIN_CLUSTER_PROFILE="${TRAIN_CLUSTER_PROFILE:-a800}"
 source "${SCRIPT_DIR}/infra_common.sh"
 
 CKPT_BASE="/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-refcache.train.16xA800.reward.16x4090.run.20260404-032344/checkpoints"

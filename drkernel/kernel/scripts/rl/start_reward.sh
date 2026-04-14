@@ -143,7 +143,7 @@ for node in "${REWARD_NODES[@]}"; do
     info "  Container running"
 
     # Verify NFS
-    if docker_exec "$node" "$container" "ls ${VLLM018_PATH}/kernelgym/__init__.py >/dev/null 2>&1"; then
+    if docker_exec "$node" "$container" "ls ${REWARD_REPO_PATH}/kernelgym/__init__.py >/dev/null 2>&1"; then
         info "  NFS OK"
     else
         error "  NFS NOT visible in ${container}!"

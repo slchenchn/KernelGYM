@@ -2,6 +2,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+for ((i=1; i<=$#; i++)); do
+    if [[ "${!i}" == "--profile" ]]; then
+        next=$((i + 1))
+        if (( next > $# )); then
+            echo "[ERROR] --profile requires a value" >&2
+            exit 1
+        fi
+        TRAIN_CLUSTER_PROFILE="${!next}"
+    fi
+done
+
 source "${SCRIPT_DIR}/infra_common.sh"
 
 usage() {
@@ -13,6 +25,7 @@ Options:
   -f, --force-reward           Restart reward infrastructure with start_reward.sh -f
       --skip-reward            Reuse the existing reward stack instead of restarting it
       --train-script PATH      Training launcher script to run
+      --profile NAME          Training cluster profile to load (e.g. h20, a800)
       --tmux-session NAME      Remote head-node tmux session name
       --local-log PATH         Remote head-node tee log path
       --workdir PATH           Remote working directory before launch
@@ -22,13 +35,14 @@ Options:
 
 Defaults:
   --train-script  drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh
-  --workdir       /nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel
+  --profile       h20
+  --workdir       <VLLM018_PATH>/drkernel from the selected profile
   --tmux-session  derived from the launcher basename
   --local-log     /tmp/<tmux-session>.log
 
 Examples:
   bash drkernel/kernel/scripts/rl/start_training.sh \
-    --train-script drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.sh
+    --train-script drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.16xA800.sh
 
   bash drkernel/kernel/scripts/rl/start_training.sh \
     --train-script drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh \
@@ -81,6 +95,29 @@ shell_quote() {
     printf '%q' "$1"
 }
 
+wait_for_ray_ready() {
+    local label="$1"
+    local runner="$2"
+    local address="$3"
+    local attempts="${4:-30}"
+    local sleep_s="${5:-2}"
+    local cmd="${ENV_ACTIVATE_CMD} && python -c 'import socket,sys; s=socket.socket(); s.settimeout(2); s.connect((sys.argv[1], int(sys.argv[2]))); s.close()' $(shell_quote "${HEAD_NODE}") $(shell_quote "${RAY_HEAD_PORT}")"
+
+    local i
+    for ((i=1; i<=attempts; i++)); do
+        if ${runner} "${cmd}" >/dev/null 2>&1; then
+            if ${runner} "${ENV_ACTIVATE_CMD} && ray status --address=${address}" >/dev/null 2>&1; then
+                info "${label} Ray readiness check passed (${i}/${attempts})"
+                return 0
+            fi
+        fi
+        sleep "${sleep_s}"
+    done
+
+    error "${label} Ray readiness check failed after ${attempts} attempts"
+    return 1
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -f|--force-reward)
@@ -94,6 +131,11 @@ while [[ $# -gt 0 ]]; do
         --train-script)
             [[ $# -ge 2 ]] || { error "--train-script requires a value"; exit 1; }
             TRAIN_SCRIPT="$2"
+            shift 2
+            ;;
+        --profile)
+            [[ $# -ge 2 ]] || { error "--profile requires a value"; exit 1; }
+            TRAIN_CLUSTER_PROFILE="$2"
             shift 2
             ;;
         --tmux-session)
@@ -140,11 +182,16 @@ fi
 
 TRAIN_SCRIPT="$(resolve_path "$TRAIN_SCRIPT")"
 WORKDIR="$(resolve_path "$WORKDIR")"
+ENV_ACTIVATE_CMD="$(python_env_prelude)"
 
 script_base="$(basename "$TRAIN_SCRIPT")"
 script_name="$(sanitize_name "$script_base")"
 TMUX_SESSION="${TMUX_SESSION:-train-${script_name}}"
 LOCAL_LOG="${LOCAL_LOG:-/tmp/${TMUX_SESSION}.log}"
+HEAD_RAY_LOG="/tmp/ray-head-${script_name}.log"
+WORKER_RAY_LOG="/tmp/ray-worker-${script_name}.log"
+HEAD_RAY_SESSION="ray-head-${script_name}"
+WORKER_RAY_SESSION="ray-worker-${script_name}"
 
 if [[ ! -f "$TRAIN_SCRIPT" ]]; then
     error "Training script not found locally: $TRAIN_SCRIPT"
@@ -152,17 +199,22 @@ if [[ ! -f "$TRAIN_SCRIPT" ]]; then
 fi
 
 launcher_env=(
-    "RAY_ADDRESS=${HEAD_NODE}:6379"
-    "GLOO_SOCKET_IFNAME=ens22f0"
-    "NCCL_SOCKET_IFNAME=ens22f0"
-    "NCCL_NET=Socket"
-    "NCCL_IB_DISABLE=1"
-    "NCCL_SOCKET_FAMILY=AF_INET"
-    "NCCL_DEBUG=WARN"
+    "RAY_ADDRESS=${HEAD_NODE}:${RAY_HEAD_PORT}"
+    "GLOO_SOCKET_IFNAME=${TRAIN_GLOO_SOCKET_IFNAME}"
+    "NCCL_SOCKET_IFNAME=${TRAIN_NCCL_SOCKET_IFNAME}"
+    "NCCL_IB_DISABLE=${TRAIN_NCCL_IB_DISABLE}"
+    "NCCL_SOCKET_FAMILY=${TRAIN_NCCL_SOCKET_FAMILY}"
+    "NCCL_DEBUG=${TRAIN_NCCL_DEBUG}"
 )
+if [[ -n "${TRAIN_NCCL_NET}" ]]; then
+    launcher_env+=("NCCL_NET=${TRAIN_NCCL_NET}")
+fi
+if [[ -n "${TRAIN_NCCL_IB_HCA}" ]]; then
+    launcher_env+=("NCCL_IB_HCA=${TRAIN_NCCL_IB_HCA}")
+fi
 launcher_env+=("${EXTRA_ENV[@]}")
 
-launch_cmd="source $(shell_quote "${VENV}/bin/activate") && cd $(shell_quote "$WORKDIR") &&"
+launch_cmd="${ENV_ACTIVATE_CMD} && cd $(shell_quote "$WORKDIR") &&"
 for kv in "${launcher_env[@]}"; do
     launch_cmd+=" $(shell_quote "$kv")"
 done
@@ -179,6 +231,7 @@ if [[ "$DRY_RUN" = "1" ]]; then
         info "Reward step: normal reward startup"
     fi
     info "Training script: $TRAIN_SCRIPT"
+    info "Cluster profile: ${TRAIN_CLUSTER_PROFILE}"
     info "Workdir: $WORKDIR"
     info "tmux session: $TMUX_SESSION"
     info "local log: $LOCAL_LOG"
@@ -210,22 +263,24 @@ fi
 echo ""
 info "=== Step 2: Starting Ray cluster ==="
 
-info "Starting Ray head on ${HEAD_NODE}..."
-head_output=$(ssh -o ConnectTimeout=10 -p ${HEAD_PORT} root@${HEAD_NODE} \
-    "source ${VENV}/bin/activate && ray stop --force >/dev/null 2>&1 || true && ray start --head --port=6379 --num-gpus=8 --dashboard-host=0.0.0.0" 2>&1)
+info "Starting Ray head on $(train_head_label)..."
+head_start_cmd="${ENV_ACTIVATE_CMD} && cd $(shell_quote "$WORKDIR") && ray stop --force >/dev/null 2>&1 || true && ray start --head --node-ip-address=${HEAD_NODE} --port=${RAY_HEAD_PORT} --num-gpus=8 --dashboard-host=0.0.0.0 >$(shell_quote "${HEAD_RAY_LOG}") 2>&1 && tail -f /dev/null"
+head_output=$(run_on_train_head \
+    "tmux kill-session -t $(shell_quote "${HEAD_RAY_SESSION}") 2>/dev/null || true; tmux new-session -d -s $(shell_quote "${HEAD_RAY_SESSION}") bash -lc $(shell_quote "${head_start_cmd}")" 2>&1)
 head_rc=$?
-echo "$head_output" | tail -5
+[[ -n "$head_output" ]] && echo "$head_output" | tail -5
 if [[ $head_rc -ne 0 ]]; then
     error "Ray head start failed (rc=${head_rc})!"
     echo "$head_output"
     exit 1
 fi
 
-info "Starting Ray worker on ${WORKER_NODE}..."
-worker_output=$(ssh -o ConnectTimeout=10 -p ${WORKER_PORT} root@${WORKER_NODE} \
-    "source ${VENV}/bin/activate && ray stop --force >/dev/null 2>&1 || true && ray start --address=${HEAD_NODE}:6379 --num-gpus=8" 2>&1)
+info "Starting Ray worker on $(train_worker_label)..."
+worker_start_cmd="${ENV_ACTIVATE_CMD} && cd $(shell_quote "$WORKDIR") && ray stop --force >/dev/null 2>&1 || true && ray start --address=${HEAD_NODE}:${RAY_HEAD_PORT} --num-gpus=8 >$(shell_quote "${WORKER_RAY_LOG}") 2>&1 && tail -f /dev/null"
+worker_output=$(run_on_train_worker \
+    "tmux kill-session -t $(shell_quote "${WORKER_RAY_SESSION}") 2>/dev/null || true; tmux new-session -d -s $(shell_quote "${WORKER_RAY_SESSION}") bash -lc $(shell_quote "${worker_start_cmd}")" 2>&1)
 worker_rc=$?
-echo "$worker_output" | tail -5
+[[ -n "$worker_output" ]] && echo "$worker_output" | tail -5
 if [[ $worker_rc -ne 0 ]]; then
     error "Ray worker start failed (rc=${worker_rc})!"
     echo "$worker_output"
@@ -233,20 +288,27 @@ if [[ $worker_rc -ne 0 ]]; then
 fi
 
 sleep 3
-GPU_COUNT=$(ssh -o ConnectTimeout=10 -p ${HEAD_PORT} root@${HEAD_NODE} \
-    "source ${VENV}/bin/activate && ray status 2>/dev/null | grep GPU || true" 2>&1)
+wait_for_ray_ready "Head" run_on_train_head "${HEAD_NODE}:${RAY_HEAD_PORT}" || {
+    run_on_train_head "tail -n 80 $(shell_quote "${HEAD_RAY_LOG}")" || true
+    exit 1
+}
+wait_for_ray_ready "Worker" run_on_train_worker "${HEAD_NODE}:${RAY_HEAD_PORT}" || {
+    run_on_train_worker "tail -n 80 $(shell_quote "${WORKER_RAY_LOG}")" || true
+    exit 1
+}
+GPU_COUNT=$(run_on_train_head \
+    "${ENV_ACTIVATE_CMD} && ray status --address=${HEAD_NODE}:${RAY_HEAD_PORT} 2>/dev/null | grep GPU || true" 2>&1)
 info "Ray cluster: ${GPU_COUNT}"
 
 echo ""
 info "=== Step 3: Launching training ==="
 
-ssh -o ConnectTimeout=10 -p ${HEAD_PORT} root@${HEAD_NODE} "test -f $(shell_quote "$TRAIN_SCRIPT")" 2>/dev/null
-if [[ $? -ne 0 ]]; then
+if ! run_on_train_head "test -f $(shell_quote "$TRAIN_SCRIPT")" >/dev/null 2>&1; then
     error "Training script not found on ${HEAD_NODE}: ${TRAIN_SCRIPT}"
     exit 1
 fi
 
-ssh -o ConnectTimeout=10 -p ${HEAD_PORT} root@${HEAD_NODE} \
+run_on_train_head \
     "tmux kill-session -t $(shell_quote "$TMUX_SESSION") 2>/dev/null || true; \
      rm -f $(shell_quote "$LOCAL_LOG"); \
      tmux new-session -d -s $(shell_quote "$TMUX_SESSION") bash -lc ${launch_cmd_quoted}" 2>&1
@@ -257,7 +319,7 @@ if [[ $tmux_rc -ne 0 ]]; then
     exit 1
 fi
 
-info "Training launched in tmux session '${TMUX_SESSION}' on ${HEAD_NODE}"
+info "Training launched in tmux session '${TMUX_SESSION}' on $(train_head_label)"
 info ""
 info "Monitor:"
 info "  ssh -p ${HEAD_PORT} root@${HEAD_NODE} 'tail -f ${LOCAL_LOG}'"

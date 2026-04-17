@@ -133,8 +133,8 @@ SAMPLE_SELECTION_STRATEGY=efficiency_stochastic
 MAX_SKIP_STEPS=5
 
 APPLY_CHAT_TEMPLATE=True
-SAVE_FREQ=10
-TEST_FREQ=10
+SAVE_FREQ="${SAVE_FREQ:-10}"
+TEST_FREQ="${TEST_FREQ:-10}"
 
 # Checkpoint save to log dir under a stable checkpoints/ root
 HDFS_CHECKPOINT_PATH="${RUN_LOG_DIR}/checkpoints"

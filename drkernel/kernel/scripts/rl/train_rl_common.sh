@@ -918,11 +918,11 @@ run_training() {
       ${GLOO_SOCKET_IFNAME:++ray_kwargs.ray_init.runtime_env.env_vars.GLOO_SOCKET_IFNAME=$GLOO_SOCKET_IFNAME} \
       ${NCCL_SOCKET_IFNAME:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME} \
       ${NCCL_NET:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_NET=$NCCL_NET} \
-      ${NCCL_IB_HCA:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_IB_HCA=$NCCL_IB_HCA} \
+      ${NCCL_IB_HCA:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_IB_HCA=\"$NCCL_IB_HCA\"} \
       ${NCCL_IB_DISABLE:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_IB_DISABLE=$NCCL_IB_DISABLE} \
       ${NCCL_SOCKET_FAMILY:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SOCKET_FAMILY=$NCCL_SOCKET_FAMILY} \
       ${NCCL_DEBUG:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_DEBUG=$NCCL_DEBUG} \
-      ${NCCL_DEBUG_SUBSYS:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_DEBUG_SUBSYS=$NCCL_DEBUG_SUBSYS} \
+      ${NCCL_DEBUG_SUBSYS:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_DEBUG_SUBSYS=\"$NCCL_DEBUG_SUBSYS\"} \
       ${GRADIENT_CHECKPOINT_INTERVAL:++ray_kwargs.ray_init.runtime_env.env_vars.GRADIENT_CHECKPOINT_INTERVAL=$GRADIENT_CHECKPOINT_INTERVAL} \
       ${DRKERNEL_SYNC_DIAG:++ray_kwargs.ray_init.runtime_env.env_vars.DRKERNEL_SYNC_DIAG=$DRKERNEL_SYNC_DIAG} \
       trainer.remove_clip=$REMOVE_CLIP \

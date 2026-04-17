@@ -258,6 +258,232 @@
 - The latest logs show NCCL `Initialized NET plugin IB` and `Using network IB` on the active run.
 - No new `Traceback`, `RuntimeError`, or `AssertionError` has appeared in the active tee log at the latest check.
 - `Training Progress` is not yet visible; the run is still in distributed worker/model bring-up rather than failed.
+#### 14B eager resume relaunched on `16.18` head + `16.51` docker worker with Socket NCCL — ACTIVE
+
+##### Problem & Impact
+
+- The user switched the 14B eager resume target again: this time the run must use `192.168.16.18` plus `192.168.16.51`, not the previously stopped `50/51` pair.
+- The mixed topology is asymmetric:
+  - `16.18` is already an exposed containerized training environment over SSH and should be used directly as the head node
+  - `16.51` is a physical host and must enter a freshly started training container first
+- The user explicitly required that this relaunch must not use IB because `16.18` does not support it, so the launch transport had to fall back to socket NCCL while preserving the same run directory and no-val resume behavior.
+- `16.51` was not actually idle at execution time:
+  - a stale `csl_verl_train` container had to be recreated
+  - a separate `vllm_minimax1m_replica51` workload was occupying all `8` GPUs
+  - after the first cleanup, host-side `/nfs/FM/ydq/minimax1m/deploy_vllm_1m_*.sh` guard scripts respawned that workload and re-took the machine
+
+##### Resolution
+
+- Added a dedicated mixed-node profile [`a800_18_51_socket.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_profiles/a800_18_51_socket.sh) instead of modifying either legacy A800 profile:
+  - head: `root@192.168.16.18:20629` with `TRAIN_HEAD_MODE=ssh`
+  - worker: `chenshuailin@192.168.16.51` with `TRAIN_WORKER_MODE=ssh-docker`
+  - transport: `NCCL_NET=Socket`, `NCCL_IB_DISABLE=1`, `NCCL_SOCKET_FAMILY=AF_INET`
+- Revalidated launch prerequisites on the actual mixed topology:
+  - `16.18` shared venv activation resolves `python`, `sys.executable`, `VIRTUAL_ENV`, and `ray` to [`/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/.venv-vllm0180`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/.venv-vllm0180)
+  - reward endpoint `http://192.168.16.39:8111/health` is healthy
+  - model path, train/val parquet paths, run log dir, and checkpoint root are all reachable from the selected nodes
+- Recreated `csl_verl_train` on `16.51` with image `192.168.14.129:80/fm/llmc:v1.1`, host network, host IPC, RDMA device exposure, and bind mounts `/data`, `/data1`, `/datastorage`, `/nfs`.
+- Bootstrapped the new `16.51` container using the requested sequence because the image still does not ship `uv`:
+  - [`/nfs/FM/chenshuailin/set_env/setup/set_pip_souce.sh`](/nfs/FM/chenshuailin/set_env/setup/set_pip_souce.sh)
+  - `python -m pip install -U uv`
+  - [`/nfs/FM/chenshuailin/set_env/setup/set_uv_python.sh`](/nfs/FM/chenshuailin/set_env/setup/set_uv_python.sh)
+- Revalidated the worker container after bootstrap and confirmed that shared venv activation now gives the expected:
+  - `python`: `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/.venv-vllm0180/bin/python`
+  - `sys.executable`: same shared venv interpreter
+  - `VIRTUAL_ENV`: same shared venv root
+  - `ray`: shared venv binary
+- Used the canonical stop script with `--profile a800_18_51_socket` to clear old Ray state, then handled the unexpected blocker that the skill did not cover: `16.51` had host-side `minimax1m` deploy guard scripts that automatically respawned `vllm_minimax1m_replica51` after cleanup.
+- Killed the concrete guard-chain PIDs and removed `vllm_minimax1m_replica51`, then rechecked that only `csl_verl_train` remained and all `8` worker GPUs stayed at `0 MiB` before launch.
+- Relaunched the resume through the canonical orchestrator with:
+  - `--profile a800_18_51_socket`
+  - `--skip-reward`
+  - `--env RUN_LOG_DIR=/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519`
+  - `--env REWARD_TASK_TIMEOUT=30`
+  - `--env VAL_BEFORE_TRAIN=False`
+  - `--env TEST_FREQ=0`
+  - tmux session `train-14b-hfsdp8-pytorch-eager-resume-1851`
+  - tee log `/tmp/train-14b-hfsdp8-pytorch-eager-resume-1851.log`
+
+##### Result & Current State
+
+- The active 14B eager resume is now the mixed `16.18 + 16.51` socket-NCCL relaunch, not the old `50/51` IB attempt.
+- Canonical bring-up succeeded end to end:
+  - `ray status --address=192.168.16.18:6379` reports `2` active nodes and `16.0/16.0 GPU` used or reserved in placement groups
+  - head tmux session `train-14b-hfsdp8-pytorch-eager-resume-1851` exists on `16.18`
+  - worker tmux session `ray-worker-14b_coldstart_trloo_hfsdp8_pytorch_eager` exists inside `16.51:/csl_verl_train`
+- Live config confirmation in [`/tmp/train-14b-hfsdp8-pytorch-eager-resume-1851.log`](/tmp/train-14b-hfsdp8-pytorch-eager-resume-1851.log) shows:
+  - `VAL_BEFORE_TRAIN: False`
+  - `test_freq: 0`
+  - the resumed run still targets the original log directory and `global_step_100` checkpoint root
+- The relaunch has already advanced past Ray registration and dataset setup into actor model initialization on both nodes:
+  - `16.18` shows `ray::WorkerDict.actor_rollout_init_model` on all `8` GPUs with per-rank checkpoint loading
+  - `16.51` shows the same `ray::WorkerDict.actor_rollout_init_model` processes inside `csl_verl_train`
+- The `16.51` host-side `minimax1m` guard scripts are no longer visible after the targeted cleanup, and the conflicting `vllm_minimax1m_replica51` container is absent at the latest check.
+- The relaunch is still in worker/model initialization; no new completed training step beyond the historical `103` has been confirmed yet.
+
+#### 14B eager resume on `16.18 + 16.51` shows step-time inflation concentrated in rollout generation — ACTIVE
+
+##### Problem & Impact
+
+- After the mixed `16.18 + 16.51` resume moved into steady-state training, the user reported that the most recent steps looked much slower than before.
+- This needed to be separated into:
+  - a real completed-step slowdown
+  - a restart artifact
+  - oversampling / retry / reward-timeout overhead
+  - or a rollout-generation throughput regression on the new topology
+
+##### Resolution
+
+- Regenerated the canonical training and eval plots with [`plot_run_dynamics.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/plot_run_dynamics.py), refreshing:
+  - [`training_dynamics_plots_by_group/timing_s.png`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/training_dynamics_plots_by_group/timing_s.png)
+  - [`training_dynamics_plots_by_group/timing_per_token_ms.png`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/training_dynamics_plots_by_group/timing_per_token_ms.png)
+  - [`training_dynamics_plots_by_group/training_summary.txt`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/training_dynamics_plots_by_group/training_summary.txt)
+- Compared pre-switch completed steps `141-149` against post-switch completed steps `151-168` from the full [`main.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/main.log):
+  - average `timing_s/step`: `875.9s` -> `2364.6s`
+  - average `timing_s/gen`: `718.2s` -> `1914.4s`
+  - average throughput: `42.04` -> `19.19`
+  - average generation time per token: `3.152 ms/token` -> `9.138 ms/token`
+- Checked the recent completed-step metrics for `160-168` and ruled out the common non-topology explanations:
+  - `batch/rollout_timeout_samples` stayed `0`
+  - `batch/selection_rate` stayed fixed at `0.571`
+  - `batch/total_samples_generated` stayed `448`
+  - `batch/total_samples_selected` stayed `256`
+  - no recent oversampling warning was emitted for these steps
+- Isolated one special-case contributor:
+  - step `160` includes `timing_s/save_checkpoint: 314s`, so that step is slower than its neighbors partly because it is a checkpoint boundary
+- Cross-checked [`vllm.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/vllm.log) and found repeated rollout heartbeat evidence of long-running batches on the new topology:
+  - many recent heartbeats show `completed=0/1 pending=1` with `tokens_in_use=64/64` and elapsed times in the `600-780s` range
+  - the current in-flight batch later degrades into a long tail with `tokens_in_use=4/64` at `~1020-1080s`
+
+##### Result & Current State
+
+- The recent slowdown is real and is dominated by rollout-generation time, not actor update, not old-log-prob recompute, and not reward-timeout retries.
+- The strongest evidence points to a topology/transport regression after the run moved from the earlier faster environment onto the mixed `16.18 + 16.51` socket-only setup:
+  - completed-step throughput dropped by about `2.2x`
+  - generation latency per token rose by about `2.9x`
+  - prompt length, response length, selection rate, and generated-sample count stayed broadly stable
+- Step `160` is additionally inflated by checkpoint save cost, but steps `164`, `166`, `167`, and `168` remain slow even without checkpoint saving, so checkpointing is not the main explanation.
+- The latest confirmed completed step remains `168`, and the current in-flight step is best interpreted as `169` from the post-`168` rollout heartbeat evidence.
+
+#### 14B eager missing checkpoint eval backfill relaunched on `16.18` head-only — COMPLETED
+
+##### Problem & Impact
+
+- The stopped 14B eager run [`trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519) had checkpoints through `global_step_150`, but canonical eval artifacts existed only through `step_100`.
+- The missing eval gap was therefore `110`, `120`, `130`, `140`, and `150`.
+- The user asked to return to the legacy A800 environment on `16.18`, but to use only that node rather than the old two-node `16.18/24` split.
+- The existing [`merge_and_eval_checkpoints.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) only knew how to fan checkpoints out across both old A800 nodes and also force-killed all visible GPU compute PIDs after each step, which is a poor fit for a shared single-node backfill.
+
+##### Resolution
+
+- Verified the old A800 head path through the repo's `a800` profile rather than ad hoc SSH:
+  - head target resolves to `root@192.168.16.18:20629`
+  - host reports as `ai-16-18`
+  - `nvidia-smi`, `python3`, and `tmux` are all available there
+  - GPUs were idle before launch
+- Confirmed the missing-checkpoint set by diffing the checkpoint root and canonical `eval_results` tree:
+  - checkpoints present: `10` through `150`
+  - evals present: `10` through `100`
+  - backfill target: `110 120 130 140 150`
+- Used a local, uncommitted change to [`merge_and_eval_checkpoints.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) to support this single-node backfill on the current worktree without replacing the canonical entrypoint:
+  - `EVAL_STEPS` can now limit evaluation to an explicit subset
+  - `EVAL_USE_WORKER=0` keeps all work on the head node only
+  - missing checkpoints are skipped explicitly instead of falling into merge failures
+  - merged HF cleanup is still supported, but the old unconditional `kill -9` of all GPU compute PIDs is now opt-in via `EVAL_CLEANUP_KILL_GPU_PIDS=1`
+- Launched the backfill inside local tmux session `eval-14b-ckpts-1618`, using the canonical eval script with:
+  - `TRAIN_CLUSTER_PROFILE=a800`
+  - `CKPT_BASE=/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/checkpoints`
+  - `EVAL_STEPS='110 120 130 140 150'`
+  - `EVAL_USE_WORKER=0`
+  - `EVAL_CLEANUP_KILL_GPU_PIDS=0`
+  - tee log `/tmp/eval-14b-ckpts-1618.log`
+
+##### Result & Current State
+
+- The head-only `16.18` backfill completed for all missing checkpoints `110 120 130 140 150`.
+- Canonical eval artifacts now exist for the full checkpoint range through `step_150`, and the summary file is present under [`eval_results/summary.txt`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/eval_results/summary.txt).
+- The local orchestrator log [`/tmp/eval-14b-ckpts-1618.log`](/tmp/eval-14b-ckpts-1618.log) reached:
+  - `step_150: eval complete`
+  - `All evaluations complete`
+  - `Summary saved`
+- The backfill succeeded on this worktree with that local helper change, but the helper edit is intentionally left uncommitted in the current branch state.
+
+#### 14B eager resume relaunched on `192.168.16.50/51` docker A800 hosts with IB — STOPPED
+
+##### Problem & Impact
+
+- The requested resume target is no longer the legacy direct-SSH A800 pair `192.168.16.18/24`; the new training nodes are host machines `192.168.16.50/51` that must be entered through Docker first.
+- The existing `a800` infra profile still points at the old nodes and direct host execution, so using it as-is would relaunch the run on the wrong machines and without the required container boundary.
+- The target resume run remains [`drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519), so the relaunch also has to preserve the old run directory, checkpoint root, reward topology, and 14B eager launcher settings while swapping only the training-node transport.
+
+##### Resolution
+
+- Added [`drkernel/kernel/scripts/rl/infra_profiles/a800_docker_50_51.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_profiles/a800_docker_50_51.sh) as a dedicated two-node A800 profile for `192.168.16.50/51`, using `ssh-docker` on both nodes instead of modifying the legacy [`a800.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_profiles/a800.sh) profile.
+- Started with conservative socket defaults on the new profile to preserve parity with the historical eager run, then switched the same profile to IB after the user explicitly required `IB` plus `nvidia_peermem`.
+- Refreshed the harness docs so the active training profile, docker-container assumptions, retained legacy A800 nodes, and intended canonical resume command are recorded in [`SPEC.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/SPEC.md) and [`INDEX.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/INDEX.md).
+- Verified ahead of launch that both new hosts accept passwordless SSH as `chenshuailin`, expose Docker without extra setup, show `8` visible GPUs each, and can reach the shared repo, model, dataset, and target checkpoint paths under `/nfs`.
+- Started preparing the new training containers with image `192.168.14.129:80/fm/llmc:v1.1` under the dedicated name `csl_verl_train`, following the user-provided `docker run` shape but replacing the missing `/data0/2/3` mounts with the host paths that actually exist on both machines: `/data`, `/data1`, `/datastorage`, and `/nfs`.
+- Ran the requested bootstrap script [`/nfs/FM/chenshuailin/set_env/setup/set_uv_python.sh`](/nfs/FM/chenshuailin/set_env/setup/set_uv_python.sh) inside the new training containers and confirmed the current image does not include the `uv` binary, so the script initially failed with `uv: command not found`.
+- Resolved the missing-`uv` blocker by following the user-directed bootstrap sequence inside both `csl_verl_train` containers:
+  - [`/nfs/FM/chenshuailin/set_env/setup/set_pip_souce.sh`](/nfs/FM/chenshuailin/set_env/setup/set_pip_souce.sh)
+  - `python -m pip install -U uv`
+  - rerun [`set_uv_python.sh`](/nfs/FM/chenshuailin/set_env/setup/set_uv_python.sh)
+- Revalidated the launch-node environment inside both containers after that fix:
+  - `which python`: `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/.venv-vllm0180/bin/python`
+  - `sys.executable`: `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/.venv-vllm0180/bin/python`
+  - `VIRTUAL_ENV`: `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/.venv-vllm0180`
+  - `tmux`: `/usr/bin/tmux`
+  - `ray`: `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/.venv-vllm0180/bin/ray`
+- Relaunched the resume through the canonical orchestrator with:
+  - `--profile a800_docker_50_51`
+  - `--skip-reward`
+  - `--env RUN_LOG_DIR=/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519`
+  - `--env REWARD_TASK_TIMEOUT=30`
+  - tmux session `train-14b-hfsdp8-pytorch-eager-resume-5051`
+  - tee log `/tmp/train-14b-hfsdp8-pytorch-eager-resume-5051.log`
+- After the user clarified that `192.168.16.50/51` support IB and `nvidia_peermem`, verified that both hosts expose active InfiniBand HCAs `mlx5_2`, `mlx5_3`, `mlx5_6`, and `mlx5_7`, and that `nvidia_peermem` is loaded on both hosts.
+- Switched [`drkernel/kernel/scripts/rl/infra_profiles/a800_docker_50_51.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_profiles/a800_docker_50_51.sh) from socket fallback to IB defaults:
+  - `NCCL_NET=IB`
+  - `NCCL_IB_DISABLE=0`
+  - `NCCL_IB_HCA=mlx5_2,mlx5_3,mlx5_6,mlx5_7`
+- Cleaned the partially relaunched socket/IB Ray state with the canonical stop script and a tmux-session cleanup, then relaunched again through `start_training.sh` with `NCCL_DEBUG_SUBSYS=INIT,NET` added as a diagnostic env override.
+- The first IB relaunches exposed two concrete blockers:
+  - all `16` training GPUs were still occupied by external `VLLM::Worker_TP*` workloads on `192.168.16.50/51`
+  - Hydra rejected comma-valued Ray runtime env overrides for `NCCL_IB_HCA` and then `NCCL_DEBUG_SUBSYS`
+- After the user explicitly authorized killing all processes and containers on `50/51`, cleared the external GPU workloads, recreated the `csl_verl_train` containers, and revalidated the launch-node environment on both hosts.
+- Updated [`drkernel/kernel/scripts/rl/train_rl_common.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/train_rl_common.sh) so Ray runtime env overrides for `NCCL_IB_HCA` and `NCCL_DEBUG_SUBSYS` are quoted as strings when passed through Hydra, which unblocked the IB relaunch.
+- After confirming from the live run config that validation was still enabled with `val_before_train=True` and `test_freq=10`, updated [`drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh) so `TEST_FREQ` is environment-overridable just like `VAL_BEFORE_TRAIN`.
+- Stopped the in-flight resume, then relaunched through the canonical startup script with `VAL_BEFORE_TRAIN=False` and `TEST_FREQ=0` so both startup validation and periodic validation are disabled for the current 14B run.
+- The no-val relaunch still failed during worker initialization, and the failure point moved from configuration/validation concerns back to model-memory pressure:
+  - `ray::WorkerDict.actor_rollout_init_model()` raised `torch.OutOfMemoryError`
+  - the crash occurred inside FSDP actor initialization in [`drkernel/verl_patch/workers/code/fsdp_workers.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/verl_patch/workers/code/fsdp_workers.py) while materializing or syncing module parameters
+  - the concrete allocator message is `Tried to allocate 2.90 GiB` with only about `0.7` to `1.3 GiB` free on GPU 0 at the failure point
+- After the user asked to clean the nodes completely and restart without changing the launch shape, removed residual non-training containers and processes on `192.168.16.50/51`, restarted `csl_verl_train` on both hosts, confirmed both machines returned to `0 MiB` GPU usage, revalidated the shared `.venv-vllm0180` toolchain, and relaunched the exact same canonical no-val resume command.
+
+##### Result & Current State
+
+- The repo now has a separate canonical profile for the `50/51` docker-based A800 training pair, while the previous `192.168.16.18/24` A800 configuration remains available for fallback instead of being overwritten.
+- The target resume run and its `global_step_100` checkpoint root were revalidated before relaunch, and the reward topology remains unchanged at `192.168.16.39:8111`.
+- The active profile is now configured to use IB on the `50/51` pair, and the current launch plan resolves the expected IB environment into the canonical startup command.
+- The `50/51` run directory [`main.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/main.log) now contains fresh `2026-04-15T11:45:26+00:00` startup lines and `2026-04-15T11:45:43+00:00` Ray init kwargs from the live docker-node relaunch.
+- `ray status` on the head container currently reports `2` active nodes and `16.0/16.0 GPU` used or reserved in placement groups during worker and model initialization.
+- The head training tmux log has advanced past the earlier Hydra and OOM failures and is currently in checkpoint shard loading, Gloo peer connectivity, and model initialization across the cluster.
+- Actual IB transport use is confirmed on both hosts because active training worker processes have open file descriptors to `/dev/infiniband/uverbs2`, `/dev/infiniband/uverbs3`, `/dev/infiniband/uverbs6`, and `/dev/infiniband/uverbs7`.
+- The validation-speed configuration is now changed for the active relaunch:
+  - launcher env shows `VAL_BEFORE_TRAIN=False` and `TEST_FREQ=0`
+  - the current `/tmp/train-14b-hfsdp8-pytorch-eager-resume-5051.log` contains `VAL_BEFORE_TRAIN: False`, `'test_freq': 0`, and `'val_before_train': False`
+- The earlier no-val relaunch did fail at [`main.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/main.log) timestamp `2026-04-15T12:01:47+00:00`, but the post-clean restart has now moved past that failure point without reproducing the same OOM.
+- The current clean relaunch appended fresh `2026-04-15T12:16:56+00:00` startup lines, resumed from `global_step_100` again at `2026-04-15T12:19:46+00:00`, and advanced through checkpoint shard loading, CUDA graph capture, and per-rank actor model/optimizer/rng/lr_scheduler restore through at least `2026-04-15T12:21:06+00:00`.
+- `ray status` on the active head container at `2026-04-15T12:21:51+00:00` reports `2` active nodes, `16.0/16.0 GPU` used or reserved in placement groups, and no recent failures.
+- GPU allocations on both hosts have stabilized around `23.6 GiB` on GPU `0` and `25.6 GiB` on GPUs `1-7` after the restore phase instead of falling back to `0 MiB` or recreating the earlier stale-allocation crash pattern.
+- The most recent confirmed completed train step is still `103`; the current in-flight phase is checkpoint restore and worker bring-up after `global_step_100`, so the run is active again but has not yet logged a new completed training step.
+- When the user later asked to stop training on `192.168.16.50/51`, the repo stop-training skill hit an unanticipated state: both `csl_verl_train` containers had already exited before the canonical stop script could be used, so the stop action became a verification and cleanup check rather than an active Ray shutdown.
+- The concrete stopped-state evidence is:
+  - `192.168.16.50`: `csl_verl_train` = `exited 137` at `2026-04-16T02:08:38.902972086Z`
+  - `192.168.16.51`: `csl_verl_train` = `exited 137` at `2026-04-16T02:08:31.925775253Z`
+  - the target [`main.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/main.log) and [`trainer.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/trainer.log) both stopped updating at `2026-04-16 10:08:57 +08:00`
+  - no host-side `main_kernel`, `kernel_trainer`, `ray::TaskRunner`, or `train-14b-hfsdp8-pytorch-eager-resume-5051` processes remained visible on either node
+- The GPUs on `50/51` are currently occupied by non-training `vllm_minimax1m_replica50/51` workloads, so the original 14B resume is stopped even though the nodes themselves are not idle.
 
 #### Local training profile selection moved to `.infra_profile.local.sh` and shared harness paths — COMPLETED
 

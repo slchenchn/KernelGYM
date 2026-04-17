@@ -28,7 +28,7 @@
 - [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.16xA800.sh`](drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.16xA800.sh)
   Two-node A800 8B eager training launcher.
 - [`drkernel/kernel/scripts/rl/train_rl_common.sh`](drkernel/kernel/scripts/rl/train_rl_common.sh)
-  Shared Hydra/config assembly for RL launches.
+  Shared Hydra/config assembly for RL launches, including Ray runtime env propagation for NCCL transport settings.
 
 ## Training Infra And Orchestration
 
@@ -40,6 +40,10 @@
   H20 training-cluster defaults used by the current active training environment.
 - [`drkernel/kernel/scripts/rl/infra_profiles/a800.sh`](drkernel/kernel/scripts/rl/infra_profiles/a800.sh)
   A800 training-cluster defaults used by the legacy two-node training and eval environment.
+- [`drkernel/kernel/scripts/rl/infra_profiles/a800_docker_50_51.sh`](drkernel/kernel/scripts/rl/infra_profiles/a800_docker_50_51.sh)
+  Docker-based A800 training-cluster defaults for `192.168.16.50/51`, preserving the legacy `a800` profile for fallback.
+- [`drkernel/kernel/scripts/rl/infra_profiles/a800_18_51_socket.sh`](drkernel/kernel/scripts/rl/infra_profiles/a800_18_51_socket.sh)
+  Mixed A800 profile for `192.168.16.18` head plus `192.168.16.51` docker worker, explicitly using socket NCCL and no IB.
 - [`.agents/skills/stop_training/scripts/stop_ray_training.sh`](.agents/skills/stop_training/scripts/stop_ray_training.sh)
   Canonical stop entrypoint for repo-managed training clusters; supports `--profile h20|a800`.
 

@@ -45,6 +45,9 @@ The repository's top-level harness files are the stable operational documents th
 5. If environment or process-state issues block startup, record the exact blocking point and the minimal remediation.
 6. Do not proactively delete `__pycache__` directories during cleanup unless the user explicitly asks for that.
 7. When creating commits, use a commit message in `xx:yy` form.
+8. Keep local git history clean while work is still unpublished:
+   - if commit scope needs to change, rewrite the local commits instead of adding follow-up "remove from commit" or "fix previous commit scope" commits
+   - do not create a commit and then immediately compensate for it with another local cleanup commit when the history can still be rewritten safely
 
 ## Execution Policy
 

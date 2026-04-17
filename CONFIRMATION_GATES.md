@@ -34,6 +34,22 @@ It is not a general reminder list, it is not populated proactively, and it is no
   - canceled as an always-ask gate
   - ask again only if a future request does not already make the timeout choice clear
 
+#### Consumed: Checkpoint Eval Merge Mode
+
+- Action:
+  - start checkpoint testing or checkpoint eval that runs the merge flow before evaluation
+  - examples include running [`merge_and_eval_checkpoints.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) or any equivalent checkpoint-eval workflow that merges FSDP shards to HF format first
+- Confirm first:
+  - whether checkpoint eval should use GPU merge or CPU merge
+- Status:
+  - consumed
+- Consumed result:
+  - always use GPU merge
+  - remove CPU merge as an available path
+- Active gate state:
+  - canceled as an always-ask gate
+  - ask again only if a future request explicitly asks to reintroduce CPU merge
+
 ### 2. Gates That Must Be Confirmed Every Time
 
 #### 1. Reward Env Stop Or Restart
@@ -43,15 +59,5 @@ It is not a general reminder list, it is not populated proactively, and it is no
   - examples include stopping or restarting reward API, Redis, reward workers, or running reward bring-up in a way that replaces the existing reward stack
 - Confirm first:
   - whether the agent should proceed with closing or restarting the reward env
-- Status:
-  - always ask
-
-#### 2. Checkpoint Eval Merge Mode
-
-- Action:
-  - start checkpoint testing or checkpoint eval that will run the merge flow before evaluation
-  - examples include running [`merge_and_eval_checkpoints.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) or any equivalent checkpoint-eval workflow that merges FSDP shards to HF format first
-- Confirm first:
-  - whether the agent should modify the merge script or merge path to use GPU merge instead of the current CPU merge flow
 - Status:
   - always ask

@@ -354,16 +354,65 @@
 - Cross-checked [`vllm.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/vllm.log) and found repeated rollout heartbeat evidence of long-running batches on the new topology:
   - many recent heartbeats show `completed=0/1 pending=1` with `tokens_in_use=64/64` and elapsed times in the `600-780s` range
   - the current in-flight batch later degrades into a long tail with `tokens_in_use=4/64` at `~1020-1080s`
+- Rechecked the reward-side hypothesis against [`handoffs/in_progress/HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/handoffs/in_progress/HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md) and then inspected the same A800 run's full [`reward.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/reward.log) instead of assuming the earlier H20 relay path still applied:
+  - this A800 run talks directly to `http://192.168.16.39:8111` on the same LAN, without the Windows relay chain used in the H20 investigation
+  - despite that topology change, the A800 run still shows very large synchronous `/evaluate` request lifetimes
+- Quantified the direct `POST /evaluate -> resp=200` gap on the A800 run from the reward log:
+  - `parallel_task_000437_acc52db6`: `2026-04-16T17:52:31+00:00 -> 2026-04-16T18:43:43+00:00` (`3072s`)
+  - `parallel_task_000846_ff5e1d0d`: `2026-04-16T17:52:16+00:00 -> 2026-04-16T18:43:03+00:00` (`3047s`)
+  - `parallel_task_001618_0f149365`: `2026-04-16T22:37:59+00:00 -> 2026-04-16T22:59:01+00:00` (`1262s`)
+  - across the run, `9` tasks exceed `300s`, and `7` exceed `600s`
+- Cross-checked those long-lived requests against the slow-step windows in [`main.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/main.log):
+  - step `160` ended at `2026-04-16T18:59:28+00:00` with `timing_s/gen=3319s`, and both `parallel_task_000437_acc52db6` and `parallel_task_000846_ff5e1d0d` were still waiting for `resp=200` inside that same step window
+  - step `167` ended at `2026-04-16T23:04:06+00:00` with `timing_s/gen=3025s`, and `parallel_task_001618_0f149365` stayed in flight until `2026-04-16T22:59:01+00:00`
+  - the current in-flight step `171` also shows the same shape: `0/16` progress for `540s`, then advance to `14/16`, then stall again at `14/16` through at least `1735.8s`
+- Distinguished the long-tail failure mode from plain `30s` kernel timeout:
+  - the worst A800 `POST -> resp` gaps are dominated by `Task failed after 2 retries. Last error: None`, not by immediate `timeout after 30s` returns
+  - for `gap > 300s`, `8/9` cases have `RUNTIME_ERROR` with `Last error: None`
+  - `parallel_task_000846_ff5e1d0d` is especially important: the final reward payload records only about `8.4s` of worker execution (`wg_run_toolkit_s`) but the synchronous HTTP request did not return for `3047s`
+- Rechecked the live reward service and the reward-side code path instead of stopping at the HTTP symptom:
+  - direct service calls showed that `/workers/status` is stale and still reports `2026-04-11` heartbeats even while new A800 requests are flowing, so that endpoint is not reliable for live liveness claims
+  - [`kernelgym/server/task_manager.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/kernelgym/server/task_manager.py) still enqueues unassigned work into global priority queues, while [`kernelgym/server/scheduler.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/kernelgym/server/scheduler.py) waits synchronously for task completion without a queue-wait timeout; once reward capacity degrades, the synchronous `/evaluate` request lifetime can therefore absorb both worker wait and global-queue wait
+- Inspected the live reward containers on both reward nodes and found the actual A800 failure boundary on `16.40`, not on the network hop:
+  - `kernelgym-reward-39` still has active `gpu_worker` service and can execute some tasks, although it keeps recycling short-lived subprocess workers
+  - `kernelgym-reward-40` still has the top-level `python3 -u -m kernelgym.worker.gpu_worker` process, but it no longer has any healthy `worker_gpu_*` subprocesses available for task execution
+  - on `16.40`, the last successful `Worker initialized successfully` lines in [`/tmp/worker.log`](/tmp/worker.log) are at `2026-04-16 02:53:24 UTC`; from `2026-04-16 02:55:18 UTC` onward, replacement spares begin failing with `Worker initialization timeout (>120s)` and the per-GPU pools start draining
+  - later failure windows show the fully degraded state directly: `Pool has no workers!`, `Emergency recovery failed`, `No idle worker available after 30s`, and `PoolTiming ... idle_wait_s=1760-3012`
+- Verified that the reward-worker spawn failure on `16.40` is backed by a host-level NVIDIA/UVM fault, not by a pure application bug:
+  - `16.39` host and container both answer `nvidia-smi -L` normally, but on `16.40` even host-side `nvidia-smi -L` hangs and leaves `nvidia-smi` in `D` state
+  - `16.40` also has large numbers of `python3 -c from multiprocessing.spawn import spawn_main ... --multiprocessing-fork` processes stuck in `D` state under the reward worker parent, which matches the subprocess-pool initialization path rather than normal task execution
+  - `dmesg -T` on `16.40` shows the deeper hardware/driver failure chain:
+    - earliest visible fault at `2026-04-16 08:36:05 UTC`: repeated `NVRM: Xid ... 13 ... Out Of Range Address` on PCI `0000:d1:00`
+    - later repeated `Xid 31` MMU faults and `Xid 43`
+    - `2026-04-16 10:52:28 UTC`: `NVRM` assertions and `Out of memory [NV_ERR_NO_MEMORY]` in RM / pool allocation
+    - `2026-04-16 10:55:09 UTC`: multiple `python3` tasks blocked for more than `120s` inside `nvidia_uvm`
 
 ##### Result & Current State
 
 - The recent slowdown is real and is dominated by rollout-generation time, not actor update, not old-log-prob recompute, and not reward-timeout retries.
-- The strongest evidence points to a topology/transport regression after the run moved from the earlier faster environment onto the mixed `16.18 + 16.51` socket-only setup:
-  - completed-step throughput dropped by about `2.2x`
-  - generation latency per token rose by about `2.9x`
-  - prompt length, response length, selection rate, and generated-sample count stayed broadly stable
+- The earlier "maybe this is mainly the mixed `16.18 + 16.51` socket transport" interpretation is no longer sufficient on its own.
+- The stronger current diagnosis boundary is:
+  - completed-step throughput still dropped by about `2.2x`
+  - generation latency per token still rose by about `2.9x`
+  - but the reward-side long tail now has direct A800 evidence too, even without the H20 relay chain
+  - the repeated slowdown therefore cannot be explained as "relay-specific" anymore
+- The A800 root cause is now materially sharper than "reward HTTP is fragile":
+  - the direct same-LAN reward path is only the messenger
+  - the primary failure is reward capacity collapse on node `16.40`, where NVIDIA/UVM has entered a bad state and reward subprocess workers can no longer initialize successfully
+  - because this service recycles short-lived subprocess workers aggressively, failed respawn drains the available worker pools
+  - once those pools are empty, the synchronous `/evaluate` contract turns internal reward-side starvation into `20-50+ min` client-visible HTTP lifetimes and rollout long tails
+  - the no-timeout global queue path in the reward service amplifies that failure further, because queue wait and pool wait are both folded into the same synchronous request lifetime
+- The mixed `16.18 + 16.51` socket topology may still explain part of the baseline throughput drop, but it does not explain the worst tails by itself:
+  - the `2.2x` step slowdown and `2.9x` per-token slowdown are real
+  - the `20-50+ min` pathological tails line up with reward-node `16.40` pool starvation and host-level NVIDIA/UVM faults, not with a relay requirement
 - Step `160` is additionally inflated by checkpoint save cost, but steps `164`, `166`, `167`, and `168` remain slow even without checkpoint saving, so checkpointing is not the main explanation.
-- The latest confirmed completed step remains `168`, and the current in-flight step is best interpreted as `169` from the post-`168` rollout heartbeat evidence.
+- The current run is still making progress despite the long tails:
+  - latest confirmed completed step: `171`
+  - current in-flight step at the latest check: `172`
+  - `step 172` repeated the same rollout shape, starting with `0/16` servers for about `540s` before gradually filling through `16/16`
+- Reward-service observability is still inconsistent after the diagnosis:
+  - `/queue/status` can drain back to `0`, but `/workers/status` remains stale with `2026-04-11` heartbeats
+  - that stale endpoint should still not be used as proof that the reward fleet is healthy
 
 #### 14B eager missing checkpoint eval backfill relaunched on `16.18` head-only — COMPLETED
 
@@ -484,6 +533,124 @@
   - the target [`main.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/main.log) and [`trainer.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/trainer.log) both stopped updating at `2026-04-16 10:08:57 +08:00`
   - no host-side `main_kernel`, `kernel_trainer`, `ray::TaskRunner`, or `train-14b-hfsdp8-pytorch-eager-resume-5051` processes remained visible on either node
 - The GPUs on `50/51` are currently occupied by non-training `vllm_minimax1m_replica50/51` workloads, so the original 14B resume is stopped even though the nodes themselves are not idle.
+
+#### 14B eager run was stopped, checkpoints `160+` were rolled back, and a forced reward restart was attempted before resuming on `50/51` with IB — BLOCKED
+
+##### Problem & Impact
+
+- The user asked to stop the current 14B resume, delete `global_step_160` and above, restart reward, and then resume from `global_step_150`.
+- During execution the requested training target changed again from the live `16.18 + 16.51` socket run back to `192.168.16.50/51`, and the user explicitly re-enabled IB for that relaunch.
+- The training-side rollback completed cleanly, but the reward restart did not converge to a healthy state:
+  - `kernelgym-reward-39` entered `Removal In Progress` while `start_reward.sh -f` was trying to replace it
+  - after that state cleared, the container came back up without a live API on `192.168.16.39:8111`
+  - `kernelgym-reward-40` remained difficult to manage and `docker exec` against it failed with `OCI runtime exec failed ... error executing setns process`
+
+##### Resolution
+
+- Stopped the active `16.18 + 16.51` training run through the canonical stop script and verified that both nodes were free of live training compute processes afterward.
+- Deleted the rollback target checkpoints under [`checkpoints`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/checkpoints):
+  - removed `global_step_160`
+  - removed `global_step_170`
+  - rewrote [`latest_checkpointed_iteration.txt`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/checkpoints/latest_checkpointed_iteration.txt) to `150`
+- Started the canonical reward restart with [`start_reward.sh -f`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_reward.sh), which hit an unanticipated runtime issue:
+  - `docker stop` on `kernelgym-reward-39` failed with `did not receive an exit event`
+  - the script then fell back to its recreate path and `docker rm -f kernelgym-reward-39` hung long enough to leave the container in `Removal In Progress`
+- Tried a temporary operational recovery to unstick Docker on `16.39` by restarting the Docker daemon, but that machine does not grant the current account `sudo`, so that host-level recovery path was not available.
+- After the user provided the `sudo` password, retried the host-level recovery:
+  - restarted Docker successfully on both `16.39` and `16.40`
+  - `16.39` recovered from the stuck `Removal In Progress` state and `kernelgym-reward-39` could be started again
+  - reran the canonical [`start_reward.sh -f`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_reward.sh) flow from a clean local session
+  - the restart still failed on `16.40`: `docker stop` on `kernelgym-reward-40` again returned `did not receive an exit event`, the script attempted recreate, and `docker run` then failed with `Conflict. The container name "/kernelgym-reward-40" is already in use`
+  - manually rechecked both hosts after the daemon restarts:
+    - on `16.39`, `kernelgym-reward-39` is `Up`, but `127.0.0.1:8111` still returns `Connection refused` and the container logs only show the image banner, so the reward API did not actually come back
+    - on `16.40`, repeated `docker stop`, `docker rm -f`, and another Docker daemon restart still left `kernelgym-reward-40` as `Up 5 days`
+    - inspection on `16.40` showed the stuck container rooted at `containerd-shim` with a `sleep` init process and hundreds of descendant `python3` / `nvidia-smi -L` processes, including `819` processes already in `D` state and `25` zombies, which explains why the container cannot be cleanly stopped from the Docker layer
+
+##### Result & Current State
+
+- The training rollback part is complete:
+  - the old `16.18 + 16.51` run is stopped
+  - only checkpoints through `global_step_150` remain
+  - auto-resume now points at `150`
+- The intended `50/51` IB resume has not been started yet because reward is still not restartable end to end:
+  - `kernelgym-reward-39` is no longer stuck in Docker removal, but it is still unhealthy because the reward API is not listening on `8111`
+  - `kernelgym-reward-40` remains the hard blocker: it cannot be cleanly stopped, the replacement container cannot be created while the old name is still reserved, and the host still has hundreds of `D`-state worker descendants under that container
+  - because the reward restart script cannot complete on `16.40` and `16.39` still does not serve the API, the reward service was not brought back to a confirmed healthy state
+- After the user escalated to physical-host recovery, issued `sudo systemctl reboot` on both reward hosts:
+  - `16.39` completed the reboot and came back with ICMP and SSH available again
+  - `16.40` completed at least the network portion of the reboot because ICMP recovered, but SSH on port `22` still did not come back within the follow-up wait window, so the host is not yet operational for reward recovery
+- This leaves the repo in a safe paused state rather than a partially resumed one:
+  - training is stopped
+  - checkpoint rollback is complete
+  - reward restart remains the blocking item before any new `50/51` IB resume
+
+#### Reward hosts were recovered after physical reboot, and the 14B eager run was relaunched on `192.168.16.50/51` with IB — ACTIVE
+
+##### Problem & Impact
+
+- The previous resume was blocked because reward recovery never converged after the rollback to
+  `global_step_150`.
+- After the physical reboots, the failure boundary changed:
+  - `16.40` SSH eventually returned and host-side `nvidia-smi -L` worked again, which confirmed
+    the earlier host-level NVIDIA/UVM hang was cleared
+  - `kernelgym-reward-40` then became a Docker metadata problem (`Dead` / `Removal In Progress`)
+    instead of a host GPU-driver hang
+  - once the dead container was cleared, `start_reward.sh -f` exposed one more host issue: `/nfs/FM`
+    was no longer mounted on `16.40`, so the recreated reward container could not see the repo
+- The user also asked that the repo-local `check-training-status` skill explicitly check training
+  timing, not only phase/state.
+
+##### Resolution
+
+- Updated
+  [`.agents/skills/check_training_status/SKILL.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/.agents/skills/check_training_status/SKILL.md)
+  so status checks must now inspect recent step timing evidence from logs or plots and report the
+  main timing contributor.
+- Used the updated timing workflow to re-read the current run summary and confirm the latest visible
+  completed step before rollback was still `170`, with step-time evidence already recorded from the
+  run plots and summary files.
+- Recovered reward in layers rather than changing repo orchestration:
+  - used `sudo systemctl restart docker` on `16.40` to clear the stuck `Dead` /
+    `Removal In Progress` container metadata after the host reboot
+  - manually remounted `eds.intellif:/FM` to `/nfs/FM` on `16.40` so the reward repo path became
+    visible again
+  - reran the canonical
+    [`start_reward.sh -f`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_reward.sh),
+    which brought the API back to `healthy` and relaunched both GPU worker processes
+- Recreated the training containers on `192.168.16.50/51` from
+  `192.168.14.129:80/fm/llmc:v1.1`, reinstalled `uv` after applying the pip source script, reran
+  `set_uv_python.sh`, and revalidated the shared
+  [`.venv-vllm0180`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/.venv-vllm0180)
+  environment with explicit `which python`, `sys.executable`, and `VIRTUAL_ENV` checks on both
+  nodes.
+- Revalidated the requested IB topology on both A800 hosts:
+  - `nvidia_peermem` is loaded
+  - `mlx5_2`, `mlx5_3`, `mlx5_6`, and `mlx5_7` are `ACTIVE`
+- Relaunched the run through the canonical
+  [`start_training.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_training.sh)
+  path with:
+  - `--profile a800_docker_50_51`
+  - `--skip-reward`
+  - `RUN_LOG_DIR=...20260409-092519`
+  - `VAL_BEFORE_TRAIN=False`
+  - `TEST_FREQ=0`
+
+##### Result & Current State
+
+- Reward is back in service:
+  - `http://192.168.16.39:8111/health` returns `healthy`
+  - worker logs on both `39/40` show fresh worker registration and heartbeat after the recovery
+- The `50/51` relaunch is active again:
+  - tmux session `train-14b-hfsdp8-pytorch-eager-resume-5051` exists in the head container on
+    `16.50`
+  - `ray status` now reports `2` active nodes and `16.0/16.0 GPU` used/reserved
+  - both `16.50` and `16.51` show fresh training memory usage across all `8` GPUs
+- The live launch log confirms the requested no-val resume settings are in effect:
+  - `VAL_BEFORE_TRAIN: False`
+  - `test_freq: 0`
+  - reward server URL still points to `http://192.168.16.39:8111`
+- The current run has progressed past launcher startup and into distributed model initialization and
+  checkpoint shard loading, so the resume is no longer blocked at infrastructure bring-up.
 
 #### Local training profile selection moved to `.infra_profile.local.sh` and shared harness paths — COMPLETED
 

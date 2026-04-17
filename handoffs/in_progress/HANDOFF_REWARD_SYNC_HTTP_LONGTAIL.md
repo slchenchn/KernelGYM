@@ -1,303 +1,380 @@
-# Reward Sync HTTP Long-Tail Handoff
+# Reward Sync HTTP Long-Tail Bug Report
 
-## Goal
+## Summary
 
-Explain why recent steps in the active 8B 12xH20 run balloon from normal `20-22 min` to `50-60+ min`, and pin down whether the failure is in:
-- reward kernel execution
-- reward worker queueing
-- token release
-- or the `/evaluate` HTTP return path
+This report covers one bug family with two layers:
 
-## Fast Start
+1. a structural reward-path bug:
+   the training side uses a synchronous `POST /evaluate` contract, and client-side rate-limit tokens
+   are only released after that HTTP call returns
+2. a concrete A800 incident trigger:
+   reward host `192.168.16.40` entered a host-level NVIDIA/UVM bad state, reward worker capacity
+   collapsed, and the synchronous `/evaluate` contract amplified that failure into `20-50+ min`
+   rollout tails
 
-- active run:
+The key correction from the later A800 incident is:
+
+- relay is **not** required for this symptom family
+- the same long-tail pattern reproduced on same-LAN training and reward nodes
+- in that incident, the deeper root cause was reward host failure, not relay instability
+
+## Impact
+
+User-visible impact:
+
+- recent training steps inflate from normal range into `50-60+ min`
+- rollout stalls at partial progress for long periods
+- reward requests accumulate behind a small number of long-lived tails
+- training can continue with degraded or suspect reward behavior unless operators intervene
+
+Training impact:
+
+- this is not primarily an `old_log_prob` slowdown
+- this is not primarily actor update slowdown
+- the dominant impact is rollout-side tail latency
+- if reward capacity is partially degraded, the training segment may become operationally or
+  statistically suspect even when some steps still complete
+
+## Affected Runs
+
+### H20 investigation run
+
+- active run during initial diagnosis:
   `drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700/`
-- main rollout log:
+- main log:
   `drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700/main.log`
-- reward client / engine log:
+- reward log:
   `drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700/reward.log`
-- structured long-tail heartbeats:
-  `drkernel/logs/structured/batch_heartbeat.pid*.jsonl`
-- client code:
-  `drkernel/kernel/rewards/reward_client.py`
-- reward server code:
-  `kernelgym/server/api/server.py`
-- reward worker pool code:
-  `kernelgym/worker/subprocess_pool.py`
-- token bucket:
-  `drkernel/verl/verl/tools/sandbox_fusion_tools.py`
 
-## Bottom Line
+### A800 reproduction and recovery run
 
-Plain-language conclusion:
+- affected run:
+  `drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/`
+- main log:
+  `drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/main.log`
+- reward log:
+  `drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/reward.log`
+- timing summary:
+  `drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/training_dynamics_plots_by_group/training_summary.txt`
+
+## Final Diagnosis
+
+### Structural bug
+
+The reward client holds scarce client-side capacity across the full lifetime of a synchronous
+`POST /evaluate` call. When that call does not return promptly, client-side tokens remain occupied
+and later reward requests are starved behind a few stuck tails.
+
+Plain-language version:
 
 `client 没有及时收到第一次 /evaluate 的 HTTP response，所以它一直占着 token 等。`
 
-This is the most important thing to preserve when handing off:
+### Incident-specific root cause on A800
 
-- it is **not** “client already received the response but forgot to release the token”
-- it is **not** “30s queue timeout”
-- it is **not** primarily `old_log_prob`
-- it is **not** primarily actor update
+The A800 incident was not caused primarily by relay behavior. The deeper root cause was:
 
-What is actually happening:
+- reward host `192.168.16.40` entered a host-level NVIDIA/UVM bad state
+- reward subprocess workers stopped initializing reliably
+- reward pool capacity collapsed on that host
+- the synchronous `/evaluate` contract then exposed that degraded capacity as long-lived tails,
+  token starvation, and `Task failed after 2 retries. Last error: None`
 
-1. reward client sends a synchronous `POST /evaluate`
-2. that request does not return to the client promptly
-3. client keeps waiting
-4. token stays occupied because token release happens only after `post()` returns
-5. enough stuck requests starve the token bucket and then starve downstream reward requests
-6. rollout gets stuck at tails like `8/12 servers, 22/32 rows` for tens of minutes
+Plain-language version:
 
-The only remaining uncertainty is **where** inside the HTTP return path it hangs:
+`A800 这次不是 relay 卡住，而是 reward-40 宿主机先坏了；同步 /evaluate 只是把这个底层故障放大成了训练侧长尾。`
 
-- inside reward server response-return
-- or in the return chain from server back to client, such as relay / long-lived HTTP connection handling
+## Scope Boundaries
 
-Current evidence is enough to say:
+This report does **not** support these explanations as the primary root cause:
 
-`问题在同步 /evaluate 的 response 回不来，而不是 kernel 还在跑，也不是 token release 逻辑漏掉了。`
+- `old_log_prob` as the main reason recent steps ballooned
+- actor update as the main reason recent steps ballooned
+- “30s queue timeout”
+- “client got the response but forgot to release token”
+- relay as a necessary explanation for every instance of this symptom family
 
-## What Is Proven
+Relay or transport can still be an occasional contributing factor, but the A800 reproduction proves
+that the same symptom family can happen with no relay dependency.
 
-### 1. Recent slow steps are rollout-side, not `old_log_prob`
+## Evidence
 
-`step 108` completed after `3117.5s` rollout, then `step 109` got stuck at `8/12` and `22/32` for over `1500s`:
+### H20 Evidence: synchronous `/evaluate` response path is too fragile
+
+### 1. The slowdown is rollout-side
+
+The initial H20 investigation showed rollout tails, not `old_log_prob` tails:
 
 - `main.log:5163` shows `step=108 ... elapsed=3117.5s`
-- `main.log:5164` shows `Training Progress ... 108/2249000`
-- `main.log:5188-5197` shows `step=109` stuck at `servers=8/12 prompt_rows=22/32`
+- `main.log:5164` shows visible completion of `step 108`
+- `main.log:5188-5197` shows `step 109` stalling at `servers=8/12` and `prompt_rows=22/32`
 
-This is reward-backed rollout tail latency, not `old_log_prob`.
+This is rollout-side latency backed by reward behavior.
 
-### 2. `30s` is real kernel execution timeout, not queue timeout
+### 2. `REWARD_TASK_TIMEOUT=30` is execution timeout, not queue wait timeout
 
-`REWARD_TASK_TIMEOUT=30` is the server-side execution timeout. The worker-pool timeout path is explicit in:
+The timeout path in:
 
 - `kernelgym/worker/subprocess_pool.py:504-557`
 
-The wording:
+shows that:
 
-- `timeout after 30s. Not retried to avoid blocking worker queue.`
+- `timeout after 30s` refers to task execution timeout inside the worker path
+- it does not mean the task waited in the queue for `30s`
 
-means:
+Counterexample:
 
-- the task already hit execution timeout
-- then the system chooses not to retry, to avoid further blocking the queue
+- `reward.log:561059-561063` shows a task that really times out at `30s`
+- the same second, `_HybridHttpWorker` still logs `POST /evaluate resp=200`
 
-It does **not** mean:
-
-- “the task waited in queue for 30s”
-
-Counterexample proving normal behavior exists:
-
-- `reward.log:561059-561063` shows a task that truly timed out after `30s`
-- the same second, `_HybridHttpWorker` logs `POST /evaluate resp=200`
-
-So normal timeout handling can return promptly.
+So the system is capable of timing out and returning promptly in the normal path.
 
 ### 3. Token release happens only after synchronous `POST /evaluate` returns
 
-In `drkernel/kernel/rewards/reward_client.py:77-99`:
+In:
 
-- token is acquired first
-- synchronous `self._client.post(.../evaluate...)` is executed
-- token is released only after `post()` returns
+- `drkernel/kernel/rewards/reward_client.py:77-99`
 
-That means:
+the flow is:
 
-- if token stays occupied for a long time, the most direct explanation is that `post()` has not returned yet
-- this rules out “client got the response but forgot to release token” as the main theory
+1. acquire token
+2. do synchronous `self._client.post(.../evaluate...)`
+3. release token after the HTTP call returns
 
-### 4. `/evaluate` is synchronous and reuses existing results for the same `task_id`
+Therefore, long-lived token occupancy strongly implies the client is still waiting on the HTTP call.
 
-`kernelgym/server/api/server.py:337-370` is decisive:
+### 4. The server contract is synchronous and cached-result reuse is possible
 
-- `_execute_workflow()` returns existing cached result immediately if `task_id` already has one
-- otherwise it executes the workflow synchronously and then completes the task
+In:
 
-This matters because a retried request with the same `task_id` can quickly return a cached result, even if the original synchronous request stayed hung for a long time.
+- `kernelgym/server/api/server.py:337-370`
 
-### 5. There are long-lived pending refs with occupied tokens
+the server:
 
-Structured heartbeat evidence:
+- returns an existing cached result immediately if the same `task_id` already has one
+- otherwise executes synchronously before returning
+
+This explains why a later retry can quickly return an already-finished result while the original
+synchronous request may have stayed open for a long time.
+
+### 5. Structured heartbeats show long-lived pending refs with occupied tokens
+
+Evidence:
 
 - `drkernel/logs/structured/batch_heartbeat.pid750009.jsonl:3801`
 - `drkernel/logs/structured/batch_heartbeat.pid750009.jsonl:3840`
 
-The same task `parallel_task_003529_580604ae` stays pending from about `60s` to `2401s+`.
+These show the same task staying pending while `tokens_in_use` remains nonzero.
 
-Important fields in those heartbeats:
+### 6. Smoking-gun H20 case: server-side completion existed long before client saw `resp=200`
 
-- `pending=1`
-- `tokens_in_use` stays nonzero
+Evidence in `reward.log`:
 
-This proves long-lived pending reward refs are holding shared client-side capacity.
-
-### 6. Smoking gun: server-side result existed long before client saw `resp=200`
-
-This is the hardest piece of evidence.
-
-In `reward.log`:
-
-- `561065` shows the client-visible failed result for `parallel_task_001413_29499634`
+- `561065` contains a payload for `parallel_task_001413_29499634`
 - that payload says `completed_at='2026-04-16T05:00:43.710603'`
-- `561068` shows `_HybridHttpWorker POST /evaluate resp=200 task_id=parallel_task_001413_29499634`
-- both of those client-visible lines happen at `2026-04-16T05:21:55+00:00`
+- `561068` later shows `_HybridHttpWorker POST /evaluate resp=200 task_id=parallel_task_001413_29499634`
+- those client-visible lines happen at `2026-04-16T05:21:55+00:00`
 
-So:
+This creates an approximately `21 min` gap between server-side completion and client-visible
+successful response.
 
-- server-side completion time was `05:00:43`
-- client did not get a `200` response until `05:21:55`
+That rules out:
 
-That gap is about `21 min`.
+- the kernel still running for the full long-tail interval
+- prompt client-side receipt of the first response
 
-This rules out:
+### A800 Evidence: relay is not necessary, reward host failure can be the deeper cause
 
-- “kernel was still running the whole time”
-- “client received the response promptly”
+### 1. Same-LAN A800 topology still showed the same tail pattern
 
-This strongly supports:
+On the A800 14B run, training and reward were on the same LAN, but reward log still showed
+extremely long `POST /evaluate -> resp=200` lifetimes, for example:
 
-- the original synchronous `/evaluate` request did not return promptly to the client
-- a later retry likely got the already-cached result for the same `task_id`
+- `reward.log:689533` to `reward.log:693193`
+- `reward.log:689597` to `reward.log:693213`
+- `reward.log:719781` to `reward.log:719783`
 
-### 7. `Last error: None` is not a mysterious kernel exception
+Those intervals correspond to multi-minute to multi-dozen-minute waits on the reward side.
 
-`kernelgym/worker/subprocess_pool.py:456-569` shows:
+### 2. Some of those long HTTP waits far exceeded the actual toolkit execution time
 
-- if `_get_idle_worker()` returns `None`
-- retry count increments
-- `last_error` may remain unset
-- final error becomes `Task failed after 2 retries. Last error: None`
+One representative case ended with a payload where toolkit runtime was only about `8.4s`, but the
+client-visible HTTP return came much later:
 
-So this message means:
+- `reward.log:693209`
 
-- worker pool saturation / no idle worker across retries
+So the shape remains consistent with the structural bug above:
+
+- the HTTP lifecycle can be much longer than the useful execution time
+
+### 3. A800 training timing confirms rollout inflation
+
+The run summary for the affected 14B run shows late-step timing inflation:
+
+- `training_summary.txt` reports latest visible completed `step 170`
+- its timing section shows:
+  - `gen (rollout): 14.8 min`
+  - `total step: 28.0 min`
+
+That is the same family of rollout inflation diagnosed in the earlier H20 case.
+
+### 4. The deeper failure boundary on A800 was reward host `16.40`
+
+During live diagnosis, the decisive signals were:
+
+- host-side `nvidia-smi -L` on `16.40` became unhealthy
+- reward worker child processes piled up and stopped initializing reliably
+- worker logs on `16.40` shifted from successful init into repeated worker-init failure behavior
+- the system later surfaced `Task failed after 2 retries. Last error: None`
+
+Relevant code path for the misleading final error string:
+
+- `kernelgym/worker/subprocess_pool.py:456-569`
+
+This error means:
+
+- no idle worker across retries
 
 It does **not** mean:
 
 - a literal kernel exception named `None`
 
-## Root Cause
+### 5. After physical reboot, the failure mode changed from GPU/UVM hang to recoverable infra faults
 
-### Primary Root Cause
+The recovery sequence proved the deeper A800 incident was host-related:
 
-The reward client and reward server are coupled through a synchronous `/evaluate` contract that is too fragile for this workload.
+- after reboot, `16.40` host-side GPU enumeration worked again
+- the old `kernelgym-reward-40` container then degraded into `Dead` /
+  `Removal In Progress` Docker state instead of GPU-driver hang
+- after clearing Docker metadata, the next blocker was a missing `/nfs/FM` mount on `16.40`
+- once `/nfs/FM` was remounted, the canonical reward startup succeeded
 
-The pathological sequence is:
+That transition is exactly what a host-level incident looks like after reboot:
 
-1. client acquires a token
-2. client makes a synchronous `POST /evaluate`
-3. server-side workflow may already finish or fail
-4. but that response does not close back to the client promptly
-5. client keeps the token occupied while waiting
-6. many such stuck calls reduce effective token capacity and create long rollout tails
+- the deepest hardware/driver hang is gone
+- secondary infra cleanup is still needed before the service becomes healthy
 
-In plain language:
+## Root Cause Statement
 
-`真正坏的是第一次 /evaluate 的 response 回不来或者回得太晚。`
+This bug family should be recorded with two layers:
 
-### Secondary Amplifier
+### Product / design root cause
 
-Server-side reward worker pool saturation amplifies the problem after the first stuck wave begins.
+The reward path uses a synchronous HTTP contract that is too fragile for long-running or partially
+degraded reward execution. Client-side rate-limit tokens remain occupied until the synchronous
+request returns, so any delay in the response path directly converts into downstream reward
+starvation and rollout long tails.
 
-Why:
+### Incident root cause for the A800 outage
 
-- token starvation slows future submissions
-- worker-pool retries then begin failing with `Last error: None`
-- some requests then quickly get cached results on retry, while others stay hung
+Reward host `192.168.16.40` suffered a host-level NVIDIA/UVM failure, which reduced or destroyed
+effective reward worker capacity. The existing synchronous `/evaluate` design then amplified that
+capacity loss into training-side long tails.
 
-This creates the observed mixed symptom set:
+## Why This Became So Expensive
 
-- some tasks timeout and return normally at `30s`
-- some tasks fail due to no idle worker
-- some tasks appear to “finish” only tens of minutes later even though `completed_at` is much earlier
-
-## What Is Ruled Out
-
-- `old_log_prob` as the main cause of the `50-60+ min` steps
-- “30s queue timeout”
-- “client got response but forgot to release token”
-- kernel execution still running for the entire long-tail interval
-- reward relay/network instability as the primary repeated explanation for the whole pattern
-
-Network or relay faults may still happen occasionally, but they do not explain the repeated multi-step pattern where:
-
-- server-side completion exists
-- client-visible `resp=200` arrives much later
-- long-lived pending refs keep tokens occupied
-
-## Why The Current Configuration Makes This Worse
-
-The active run keeps very large client-side wait windows:
+The active configurations tolerate very long client-side wait windows compared with the
+`30s` server-side execution timeout. For example, the run config includes large values such as:
 
 - `reward_model.acquire_timeout: 2400`
 - `reward_model.max_retries: 3`
 - `reward_model.task_timeout_in_client: 2400`
 - `reward_model.timeout: 1800`
 
-See `trainer.log` around:
+This mismatch allows a small number of bad requests to live much longer than the nominal kernel
+execution timeout and to poison the effective throughput of the whole step.
 
-- `13877-13981`
-- `14500-14604`
-- `16105-16209`
-- `24658-24762`
+## Recovery Performed For The A800 Incident
 
-This means:
+The incident was recovered with this sequence:
 
-- server-side kernel timeout is only `30s`
-- but client-side HTTP / token / retry lifetime can extend into tens of minutes
+1. stop the live 14B run
+2. delete `global_step_160` and above, leaving resume state at `global_step_150`
+3. reboot reward hosts `16.39` and `16.40`
+4. on `16.40`, clear dead Docker metadata for `kernelgym-reward-40`
+5. remount `eds.intellif:/FM` to `/nfs/FM` on `16.40`
+6. rerun canonical reward startup:
+   `drkernel/kernel/scripts/rl/start_reward.sh -f`
+7. recreate the training containers on `192.168.16.50/51`
+8. reinstall `uv`, rerun `set_uv_python.sh`, and verify the shared
+   `.venv-vllm0180`
+9. relaunch the run on `50/51` with IB through the canonical launcher and no validation:
+   - `VAL_BEFORE_TRAIN=False`
+   - `TEST_FREQ=0`
 
-That mismatch is large enough to turn a subset of bad requests into step-killing long tails.
+## Current State After Recovery
+
+As of the latest recovery and relaunch:
+
+- reward health endpoint is back to `healthy`:
+  `http://192.168.16.39:8111/health`
+- reward worker logs on both `39/40` show fresh registration and heartbeat
+- the 14B run is active again on `192.168.16.50/51`
+- `ray status` reports:
+  - `2` active nodes
+  - `16.0/16.0 GPU` used/reserved
+- the relaunch has advanced past launcher startup into distributed model initialization and
+  checkpoint shard loading
 
 ## Verification Commands
 
-### Confirm the smoking-gun case
+### H20: confirm the smoking-gun delayed response case
 
 ```bash
 run=drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700
 nl -ba "$run/reward.log" | sed -n '561059,561068p'
 ```
 
-Look for:
-
-- a task whose payload `completed_at` is much earlier than the eventual `POST /evaluate resp=200`
-
-### Confirm long-lived pending refs
+### H20: confirm long-lived pending refs with occupied tokens
 
 ```bash
 nl -ba drkernel/logs/structured/batch_heartbeat.pid750009.jsonl | sed -n '3801,3840p'
 ```
 
-Look for:
-
-- same `task_id`
-- `pending=1`
-- `elapsed_s` climbing into thousands of seconds
-- `tokens_in_use` staying nonzero
-
-### Confirm token-release placement
+### Code: confirm token release placement
 
 ```bash
 nl -ba drkernel/kernel/rewards/reward_client.py | sed -n '77,99p'
 ```
 
-### Confirm synchronous server contract and cached-result reuse
+### Code: confirm synchronous server contract and cached-result reuse
 
 ```bash
 nl -ba kernelgym/server/api/server.py | sed -n '337,370p'
 ```
 
-### Confirm `Last error: None` means no idle worker path
+### Code: confirm `Last error: None` means no-idle-worker path
 
 ```bash
 nl -ba kernelgym/worker/subprocess_pool.py | sed -n '456,569p'
 ```
 
-## Recommended Next Fixes
+### A800: confirm late-step timing inflation
 
-### 1. Stop holding client token across the full synchronous `/evaluate` lifetime
+```bash
+sed -n '1,120p' \
+  drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/training_dynamics_plots_by_group/training_summary.txt
+```
+
+### A800: confirm representative long-lived reward responses
+
+```bash
+run=drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519
+nl -ba "$run/reward.log" | sed -n '689533,693222p'
+nl -ba "$run/reward.log" | sed -n '719781,719786p'
+```
+
+## Recommended Fixes
+
+### 1. Separate design fix from incident response
+
+Do not treat every long-tail event as purely network or purely reward-worker. The next incident
+response should explicitly split:
+
+- reward host health
+- reward worker capacity
+- synchronous HTTP response behavior
+
+### 2. Replace the synchronous submit-and-wait contract
 
 Best fix:
 
@@ -305,65 +382,49 @@ Best fix:
 
 Minimum acceptable fix:
 
-- do not keep the rate-limit token occupied while waiting for final synchronous completion
+- do not hold scarce client-side rate-limit tokens across the full synchronous `/evaluate`
+  lifetime
 
-### 2. Separate submission timeout from final-result timeout
-
-Current behavior conflates:
-
-- request submission
-- server execution
-- final HTTP response delivery
+### 3. Split timeout domains
 
 The system needs separate controls for:
 
 - connect timeout
-- request/ack timeout
+- request submission / ack timeout
+- task execution timeout
 - result polling timeout
 
-### 3. On timeout or retry, do not blindly reissue the same long synchronous `POST /evaluate`
+### 4. Add fail-fast host health gates
 
-Preferred behavior:
+Before blaming relay or training topology, gate reward hosts with:
 
-- first retry should check task status or results by `task_id`
-- only resubmit if the task truly does not exist
+- `nvidia-smi -L`
+- a minimal CUDA init
+- full worker-pool startup
+- one real `/evaluate` warmup
 
-### 4. Add explicit attempt-level logging around the synchronous HTTP call
+Any failure should remove that host from service immediately.
 
-Specifically log:
+### 5. Improve error semantics
 
-- attempt id
-- request start timestamp
-- timeout / connect / transport exception type
-- request end timestamp
-- whether the result came from cached `task_id`
+Replace the misleading final error:
 
-Without this, the next investigation will again have to infer too much from side effects.
+- `Task failed after 2 retries. Last error: None`
 
-### 5. Replace `Last error: None` with a structured `NO_IDLE_WORKER` failure
+with an explicit structured failure such as:
 
-Current string is misleading and wastes debugging time.
+- `NO_IDLE_WORKER`
+- `WORKER_INIT_TIMEOUT`
+- `HOST_HEALTH_FAILED`
 
-## What Not To Do First
+### 6. Make recovery runbooks explicit
 
-- do not start by tuning `old_log_prob`
-- do not assume `REWARD_TASK_TIMEOUT=30` is the main cause
-- do not start by changing rollout oversampling
-- do not treat this as a pure network problem without preserving the synchronous-response evidence
+For this reward stack, the operational runbook should explicitly include:
 
-## Current Run State At Time Of Diagnosis
-
-At the time this handoff was written:
-
-- latest successful visible step: `108`
-- current in-flight step at diagnosis boundary: `109`
-- observed stall shape: `servers=8/12`, `prompt_rows=22/32`, `elapsed>1500s`
-
-Relevant lines:
-
-- `main.log:5164`
-- `main.log:5166-5205`
+- host reboot as a valid recovery step for NVIDIA/UVM incidents
+- Docker dead-container cleanup
+- `/nfs/FM` remount verification after host reboot
 
 ## One-Sentence Handoff
 
-`最近几个 step 变慢的根因，是 reward client 在同步 /evaluate 上长时间等不到 response，导致 token 长时间不释放，后续 reward 请求被饿住，rollout 被少数尾部请求拖到 50-60+ 分钟。`
+`同步 /evaluate 长尾是这个 bug family 的表层机制，但 A800 已证明更深的 root cause 也可能是 reward 节点宿主机故障；出现同类长尾时，先查 reward host 健康，再查 HTTP/relay return path。`

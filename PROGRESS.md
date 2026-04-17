@@ -1,5 +1,264 @@
 # Progress
 
+#### 8B H20 run with prompt oversampling `2.0` failed again when the Windows-hosted reward relay dropped, then resumed from `global_step_40` after lowering the vLLM rollout memory budget to `0.6`; a later actor-update OOM was traced to external worker-node GPU contention, and after a user-requested stop on suspected reward instability the run has now been resumed again from `global_step_80` — ACTIVE
+
+##### Problem & Impact
+
+- The earlier `12xH20` 8B run at [`trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-033953`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-033953) was launched with `prompt_oversampling_factor=1.0` and repeatedly missed the required `256` selected samples at `step 2`, which forced buffered retry rollouts and repeatedly re-paid the expensive `old_log_prob` phase.
+- The user therefore asked to raise prompt oversampling to `2.0` and restart training so the run could clear the early low-batch bottleneck.
+- The new run at [`trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700) did clear the original early retry bottleneck and progressed through visible `step 48`, but it later failed again at `2026-04-15 06:18:46 UTC` during in-flight `step 49` with `RuntimeError: No valid samples were selected after filtering. Increase rollout number to ensure that there are valid examples for training.`
+- The second failure window again aligned with the Windows-hosted reward relay disappearing. That broke the local head-node reward path and left the run unable to continue until the relay was restored and training was resumed from checkpoint.
+- The first in-place resume after the relay was restored did reach `global_step_40`, but it then failed at `2026-04-15 07:09:46 UTC` during async vLLM wake-up with `RuntimeError: CUDA Error: out of memory at /workspace/csrc/cumem_allocator.cpp:139` while allocating `kv_cache`.
+- The second in-place resume with `ROLLOUT_GPU_MEMORY_UTIL=0.6` did clear the earlier vLLM wake-up OOM and progressed through visible `step 45`, but it later failed again at `2026-04-15 09:22:58 UTC` during actor update on worker node `10.0.18.5` with `torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 8.49 GiB. GPU 0 ... had only 1.19 GiB free.`
+- By `2026-04-16 00:56 UTC`, the same resumed branch had progressed to visible `step 82` with in-flight `step 83`, but the latest durable checkpoint tracker still pointed at `global_step_80` because `trainer.save_freq=10`. The user then asked to stop training first due suspected reward-env instability and explicitly resume from `step80`.
+
+##### Resolution
+
+- Stopped the old `prompt_oversampling_factor=1.0` run with [`.agents/skills/stop_training/scripts/stop_ray_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/.agents/skills/stop_training/scripts/stop_ray_training.sh), changed [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp6_pytorch_eager.12xH20.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/8b_trloo_hfsdp6_pytorch_eager.12xH20.sh) so its default `PROMPT_OVERSAMPLING_FACTOR` is `2.0`, revalidated Python / model / data / reward-endpoint reachability on both training nodes, and relaunched through the canonical startup script.
+- Verified from the full `main.log` rather than activity alone that the restarted run completed visible train steps through `step 38`, so `oversampling=2.0` did solve the original early retry loop rather than failing at the same `step 2` bottleneck.
+- After the later crash, cross-checked `main.log`, `trainer.log`, and [`/tmp/train-8b-12xh20-ib.log`](/tmp/train-8b-12xh20-ib.log) and confirmed the terminal failure, then traced the concrete break to the local reward relay chain on the head node:
+  - `CRITICAL: No samples selected! Batch is empty. Check filtering criteria.`
+  - `RuntimeError: No valid samples were selected after filtering. Increase rollout number to ensure that there are valid examples for training.`
+  - repeated `Server disconnected without sending a response.` in `reward.log` / `vllm.log`
+  - `reward-relay-18112` still listening on `18112`, but repeated `connect(5, AF=2 127.0.0.1:18111, 16): Connection refused` because the Windows-hosted reverse relay behind `127.0.0.1:18111` was gone
+- After the relay dropped again on `2026-04-15`, rechecked the concrete break from the training head before relaunch:
+  - `curl http://127.0.0.1:18111/health` failed
+  - `curl http://10.0.18.3:18112/health` returned `Empty reply from server`
+  - `ss -ltnp` showed only `0.0.0.0:18112` from `socat`, not `127.0.0.1:18111`
+  - the `reward-relay-18112` tmux pane again logged repeated `connect(5, AF=2 127.0.0.1:18111, 16): Connection refused`
+- After the user restored the Windows relay again on `2026-04-15`, revalidated the full reward path from the training head before relaunch:
+  - `http://127.0.0.1:18111/health` and `http://10.0.18.3:18112/health` both return `healthy`
+  - `ss -ltnp` now shows both `127.0.0.1:18111` and `0.0.0.0:18112`
+- Relaunched the same run directory through the canonical startup script with `RUN_LOG_DIR` pointed back at [`trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700), so the trainer reuses the existing checkpoint root instead of creating a new run.
+- Revalidated prelaunch prerequisites on both training nodes before the resume relaunch:
+  - `which python`: `/usr/bin/python`
+  - `sys.executable`: `/usr/bin/python`
+  - `VIRTUAL_ENV`: unset
+  - model and train/val parquet paths reachable on the nodes that use them
+  - reward endpoint healthy again from the training head
+- Confirmed the resume source on disk:
+  - [`checkpoints/latest_checkpointed_iteration.txt`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700/checkpoints/latest_checkpointed_iteration.txt) exists and contains `40`
+  - `trainer.resume_mode=auto`
+  - `trainer.default_local_dir` points at the same checkpoint root
+  - [`drkernel/verl/verl/trainer/ppo/ray_trainer.py`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/verl/verl/trainer/ppo/ray_trainer.py:819) resolves auto-resume from that tracker file and then sets `self.global_steps` from the chosen `global_step_*` folder
+- After the first resume hit the new wake-up OOM, relaunched the same run directory again through the canonical startup script with one runtime mitigation only:
+  - `ROLLOUT_GPU_MEMORY_UTIL=0.6`
+- Verified from the new trainer config dump that the mitigation landed:
+  - `actor_rollout_ref.rollout.gpu_memory_utilization: 0.6`
+- Confirmed the second resume again resolved the same checkpoint root and crossed the previous wake-up boundary:
+  - `Found checkpoint: .../checkpoints/global_step_40`
+  - `Load from checkpoint folder: .../checkpoints/global_step_40`
+  - `Setting global step to 40`
+  - `Resuming from .../checkpoints/global_step_40`
+  - `Training Progress: 40/2249000`
+  - `[RolloutProgress] step=41 ... phase=start`
+- After the later stop, rechecked the full `main.log`, `trainer.log`, tee log, Ray state, and both nodes' live GPU process tables instead of assuming the new OOM came from the same rollout-side wake-up path:
+  - `main.log` / tee log now end at `2026-04-15 09:22:58 UTC` with `ray.exceptions.RayTaskError(OutOfMemoryError)` from `WorkerDict.actor_rollout_update_actor()`
+  - the failing stack is actor backward on worker `10.0.18.5`, not vLLM wake-up on the head node
+  - the last successful visible train step is `45`, and the failed in-flight step is `46`
+  - after the crash, `tmux` is gone and `ray status --address=10.0.18.3:6379` reports `0.0/12.0 GPU` in use
+  - the head node `10.0.18.3` GPUs are now fully idle
+  - the worker node `10.0.18.5` still has unrelated non-Ray Python jobs holding GPU memory, including one on training-slice `GPU 0`
+  - the concrete external worker-node GPU users observed right after the crash were:
+    - `GPU 0`: `/opt/conda/bin/python3 /data3/yhy/6/profile_ncu_wan_t2v.py ...` using about `23 GiB`
+    - `GPU 6`: `python3 benchmark_14b_720p_fp8_sagesla.py --repeat 5 --warmup 1 --tag v_prep_overlap` using about `71.8 GiB`
+    - `GPU 7`: `/opt/conda/bin/python /data3/yhy/project/IntellifTurboDiffusion/turbodiffusion/inference/wan2.1_t2v_infer_ncu.py ...` using about `26.4 GiB`
+  - because this training topology intentionally uses GPUs `0-5` on each node, the external process on worker `GPU 0` directly overlaps the training slice
+- After the user cleared the overlapping worker-node jobs, revalidated prerequisites before relaunch:
+  - local and worker-node training-slice GPUs `0-5` were free again
+  - reward health still passed on `http://127.0.0.1:18111/health` and `http://10.0.18.3:18112/health`
+  - `which python` and `sys.executable` were still `/usr/bin/python`
+  - `VIRTUAL_ENV` remained unset
+  - the 8B model path and both train/val parquet paths were still reachable on the head and worker nodes
+  - `checkpoints/latest_checkpointed_iteration.txt` still contained `40`
+- Relaunched the same run directory again through the canonical startup script with the same runtime mitigation and topology:
+  - `--profile h20`
+  - `--skip-reward`
+  - `--train-script drkernel/kernel/scripts/rl/8b_trloo_hfsdp6_pytorch_eager.12xH20.sh`
+  - `--tmux-session train-8b-12xh20-ib`
+  - `--local-log /tmp/train-8b-12xh20-ib.log`
+  - `--env RUN_LOG_DIR=.../trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700`
+  - `--env TRAIN_CUDA_VISIBLE_DEVICES=0,1,2,3,4,5`
+  - `--env NCCL_NET=IB`
+  - `--env NCCL_DEBUG=INFO`
+  - `--env ROLLOUT_GPU_MEMORY_UTIL=0.6`
+- Verified from the fresh `TaskRunner pid=3743147` config dump that the intended overrides landed again:
+  - `nnodes: 2`
+  - `n_gpus_per_node: 6`
+  - `server_url: http://10.0.18.3:18112`
+  - `NCCL_NET: IB`
+  - `NCCL_DEBUG: INFO`
+  - `actor_rollout_ref.rollout.gpu_memory_utilization: 0.6`
+- Verified from the same resumed branch that checkpoint restore is real, not inferred from tmux activity alone:
+  - `Found checkpoint: .../checkpoints/global_step_40`
+  - `Load from checkpoint folder: .../checkpoints/global_step_40`
+  - `Setting global step to 40`
+  - `Resuming from .../checkpoints/global_step_40`
+  - actor ranks then began loading `model_world_size_12_rank_*`, `optim_world_size_12_rank_*`, and `extra_state_world_size_12_rank_*` from `global_step_40`
+- When the user later asked to stop first and resume from `step80`, stopped the live cluster through the canonical stop script instead of killing the local tmux pane:
+  - pre-stop live status was visible `step 82` with in-flight `step 83`
+  - `tmux has-session -t train-8b-12xh20-ib` then returned missing
+  - `ray status --address=10.0.18.3:6379` stopped answering because GCS was down
+  - both `main.log` and `trainer.log` stopped advancing after the stop window
+- Revalidated resume prerequisites from the head node before relaunch:
+  - `which python`: `/usr/bin/python`
+  - `sys.executable`: `/usr/bin/python`
+  - `VIRTUAL_ENV`: unset
+  - reward endpoints `http://127.0.0.1:18111/health` and `http://10.0.18.3:18112/health` both returned healthy
+  - model path, train parquet, val parquet, and `checkpoints/global_step_80` were all reachable
+  - [`checkpoints/latest_checkpointed_iteration.txt`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700/checkpoints/latest_checkpointed_iteration.txt) still contained `80`
+- Relaunched the same run directory again through the canonical startup script with the same sliced-node topology and runtime mitigation:
+  - `--profile h20`
+  - `--skip-reward`
+  - `--train-script drkernel/kernel/scripts/rl/8b_trloo_hfsdp6_pytorch_eager.12xH20.sh`
+  - `--tmux-session train-8b-12xh20-ib`
+  - `--local-log /tmp/train-8b-12xh20-ib.log`
+  - `--env RUN_LOG_DIR=.../trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700`
+  - `--env TRAIN_CUDA_VISIBLE_DEVICES=0,1,2,3,4,5`
+  - `--env NCCL_NET=IB`
+  - `--env NCCL_DEBUG=INFO`
+  - `--env ROLLOUT_GPU_MEMORY_UTIL=0.6`
+- Verified from the fresh `TaskRunner pid=746600` logs that the requested checkpoint was honored:
+  - `Found checkpoint: .../checkpoints/global_step_80`
+  - `Load from checkpoint folder: .../checkpoints/global_step_80`
+  - `Setting global step to 80`
+  - `Resuming from .../checkpoints/global_step_80`
+  - `Training Progress: 80/2249000`
+  - `[RolloutProgress] step=81 ... phase=start`
+- After the user asked why the most recent steps had become much slower, regenerated the canonical training dynamics plots and re-checked the full `main.log`, `trainer.log`, `reward.log`, and `vllm.log` instead of inferring from tmux or GPU activity:
+  - ran [`drkernel/kernel/scripts/rl/plot_run_dynamics.py`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/plot_run_dynamics.py) on the active run directory and refreshed [`training_dynamics_plots_by_group`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700/training_dynamics_plots_by_group)
+  - the completed recent steps split into two timing bands:
+    - `step 102-103`: about `20-22 min/step`
+    - `step 104-108`: about `56-64 min/step`
+  - the slowdown is dominated by rollout generation rather than actor update or old-log-prob:
+    - `step 108 timing_s/gen`: `3131.7s` (`52.2 min`)
+    - `step 108 timing_s/old_log_prob`: `334.7s` (`5.6 min`)
+    - `step 108 timing_s/update_actor`: `87.6s` (`1.5 min`)
+  - the rollout progress traces for `step 104-109` show the same long-tail pattern:
+    - long initial `servers=0/12` heartbeat windows
+    - later only one or a few slow servers remain pending while the rest have finished
+    - `step 108` did not reach `12/12` servers until `3117.5s`
+    - current `step 109` is repeating the same pattern
+  - the reward / vLLM side now shows heavy long-tail evidence during these slow steps, but the `30s` timeout needs a more precise interpretation:
+    - `reward.log` contains large volumes of `timeout after 30s` and `Server disconnected without sending a response.`
+    - the `timeout after 30s` message comes from the reward worker subprocess pool after a real per-task kernel evaluation timeout, not from queue wait timeout
+    - launcher config still sets `REWARD_TASK_TIMEOUT=30`, while the reward client separately keeps a much larger client/network timeout window
+    - `vllm.log` contains repeated `[BatchHeartbeat] completed=0/1 pending=1` lines persisting for `~840s`, `~960s`, `~1200s`, and in the previous step up to `~2880s`
+    - repo-level structured heartbeat logs under [`drkernel/logs/structured`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/structured) show the exact pending task ids surviving for `1200-3060s` per ref rather than only a vague batch-level stall
+    - those same heartbeat records show that the reward token bucket stays occupied by long-lived pending refs, which means the long tail is not "old_log_prob" and not actor update; it is reward request lifetime
+    - the reward client uses synchronous `POST /evaluate` and holds its token until that HTTP call returns; `task_timeout=30` only limits the kernel worker execution, while the client still uses `timeout=1800`, `task_timeout_in_client=2400`, `acquire_timeout=2400`, and `max_retries=3`
+    - the reward server's `/evaluate` path is synchronous and idempotent on `task_id`: retries with the same `task_id` can return a cached result immediately if the first request already completed server-side
+    - concrete evidence of that mismatch exists in the live logs: some final reward payloads contain `completed_at` timestamps more than `20 min` earlier than the client-side `Task failed result` log line, which means the server had already finished while the client-side synchronous request was still unresolved
+    - the repeated `Task failed after 2 retries. Last error: None` string is also now explained by code: it is the `kernelgym` subprocess pool path where `_get_idle_worker(timeout=30)` returns no idle worker across all retries, not a real kernel-level exception object named `None`
+  - this changes the performance diagnosis boundary:
+    - the recent slowdown is not primarily `old_log_prob`
+    - the recent slowdown is not primarily actor backward/update
+    - the recent slowdown is rollout-side long-tail waiting on reward-backed batches / tool tasks
+    - more specifically, the active root cause is no longer "queue timeout"
+    - the active root cause is a contract mismatch between the synchronous reward `/evaluate` API and the client-side token / retry model: a small number of long-lived or transport-stuck synchronous `/evaluate` calls keep reward refs pending for `20-50+ min`, pin rate-limit tokens, starve later reward submissions, and then eventually collapse into delayed cached results or delayed `failed after 2 retries` responses from an already-saturated worker pool
+
+##### Result & Current State
+
+- The active run directory remains [`trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-044700), and the run is active again after the latest resume relaunch.
+- The reward-path diagnosis boundary is now stable:
+  - the later `step 49` crash aligned with the Windows-hosted relay disappearing again
+  - the relay has since been restored again
+  - the training-head reward entrypoints `127.0.0.1:18111` and `10.0.18.3:18112` are healthy again
+  - the stale `workers/status` heartbeats should still be treated as an observability inconsistency rather than a current blocker
+- The latest relaunches did hit the intended checkpoint rather than starting from scratch:
+  - the first post-relay resume at `2026-04-15 07:09 UTC` loaded `global_step_40` but then failed in async vLLM wake-up with the new `cumem_allocator` OOM
+  - the second post-relay resume at `2026-04-15 07:19 UTC` also loaded `global_step_40`, but this time with `ROLLOUT_GPU_MEMORY_UTIL=0.6`
+  - the latest post-contention resume at `2026-04-15 09:41 UTC` again loaded `global_step_40` with the same `ROLLOUT_GPU_MEMORY_UTIL=0.6` mitigation
+  - the latest controlled stop-and-resume at `2026-04-16 01:01 UTC` loaded `global_step_80` as explicitly requested by the user
+- The latest resumed branch made real new progress before the next stop:
+  - it advanced beyond the previous resume point and completed visible steps through `45`
+  - the failed in-flight step was `46`
+- The current blocker is no longer reward reachability, and the earlier wake-up OOM is no longer the immediate failure mode:
+  - the relay remains healthy on `127.0.0.1:18111` and `10.0.18.3:18112`
+  - the previous OOM boundary was `TaskRunner.fit() -> async_rollout_manager.wake_up() -> MultiTurnAsyncvLLMEngine.wake_up() -> vllm/device_allocator/cumem.py`
+  - lowering `ROLLOUT_GPU_MEMORY_UTIL` to `0.6` let the resumed run pass that boundary and continue training through visible `step 45`
+  - the new stop instead came from actor-backward OOM on worker `10.0.18.5`
+- The worker-node contention is no longer the current blocker:
+  - the overlapping external job on worker `GPU 0` was cleared before relaunch
+  - head-node tmux session `train-8b-12xh20-ib` exists again
+  - `ray status --address=10.0.18.3:6379` again shows `12.0/12.0 GPU` in use
+  - the newest resumed branch has already progressed well beyond the checkpoint it reloaded:
+    - latest durable checkpoint tracker: `global_step_100`
+    - latest successful visible train step: `108`
+    - current in-flight step: `109`
+  - retry / oversampling state:
+    - no current low-batch retry or oversampling loop is visible
+    - the active step is stuck inside rollout heartbeat / partial server completion rather than retry
+  - the current performance blocker is rollout-side long-tail latency:
+    - recent completed steps `104-108` all spent about `50-58 min` in `timing_s/gen`
+    - `old_log_prob` remained about `4.4-5.6 min`
+    - `update_actor` remained about `0.7-1.5 min`
+    - current `step 109` is still in rollout with only partial server completion
+    - the long-tail reward pattern is now explained well enough to act on:
+      - reducing only the server-side `task_timeout=30` does not solve the stall
+      - the critical path is the synchronous HTTP lifetime and retry behavior around `/evaluate`
+      - until that contract is changed or the client times out / cancels much earlier, a few bad reward tasks can keep a rollout step alive for tens of minutes even after the underlying server work has already finished or failed
+  - WandB state: this run still uses `trainer.logger=['console']`, so there is no live WandB run state to rely on
+
+#### 8B H20 training relaunched as `12xH20` using GPUs `0-5` on both nodes — SUPERSEDED
+
+##### Problem & Impact
+
+- The user asked to stop the current training run and relaunch on both H20 nodes while using only the first `6` GPUs per node, for `12` training GPUs total.
+- The repo could not express that topology as-is:
+  - [`drkernel/kernel/scripts/rl/start_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_training.sh) hardcoded `ray start --num-gpus=8` on both nodes
+  - the H20 8B launchers only covered `8xH20` and `16xH20`
+  - the first relaunch attempt also exposed a tmux-session naming bug in `start_training.sh`, where `.` in the derived session name was not normalized but tmux silently converted it to `_`, causing duplicate-session failures on retry
+- The requested `oversampling=1.0` also needed to be reflected explicitly in the new launcher rather than left implicit.
+
+##### Resolution
+
+- Stopped the active training cluster through [`.agents/skills/stop_training/scripts/stop_ray_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/.agents/skills/stop_training/scripts/stop_ray_training.sh) and verified that the old head and worker GPUs were free before relaunch.
+- Updated [`drkernel/kernel/scripts/rl/start_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_training.sh) so launch-time env overrides can now control:
+  - Ray `--num-gpus` per node
+  - `CUDA_VISIBLE_DEVICES` pinning for Ray head/worker startup
+  - the corresponding launcher-side `CUDA_VISIBLE_DEVICES`
+- Fixed `sanitize_name()` in [`drkernel/kernel/scripts/rl/start_training.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_training.sh) so derived tmux session names normalize `.` to `_` and can be killed/reused safely.
+- Parameterized [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.8xH20.sh) so its topology defaults can be overridden cleanly by a thin top-level wrapper.
+- Added the new top-level launcher [`drkernel/kernel/scripts/rl/8b_trloo_hfsdp6_pytorch_eager.12xH20.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/8b_trloo_hfsdp6_pytorch_eager.12xH20.sh), which sets:
+  - `NNODES=2`
+  - `GPUS_PER_NODE=6`
+  - `N_GPUS_PER_NODE=6`
+  - `FSDP_SIZE=6`
+  - `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5`
+  - `prompt_oversampling_factor=1.0`
+  - `sample_oversampling_factor=1.0`
+  - cross-node reward URL `http://10.0.18.3:18112`
+- Relaunched through the canonical startup script with:
+  - `--profile h20`
+  - `--skip-reward`
+  - `--train-script drkernel/kernel/scripts/rl/8b_trloo_hfsdp6_pytorch_eager.12xH20.sh`
+  - `--tmux-session train-8b-12xh20-ib`
+  - `--local-log /tmp/train-8b-12xh20-ib.log`
+  - `--env TRAIN_CUDA_VISIBLE_DEVICES=0,1,2,3,4,5`
+  - `--env NCCL_NET=IB`
+  - `--env NCCL_DEBUG=INFO`
+
+##### Result & Current State
+
+- The active run directory is [`trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-033953`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-8b-hfsdp6-pytorch-eager.train.12xH20.reward.16x4090.run.20260414-033953).
+- The active head-node tmux session is [`train-8b-12xh20-ib`](/tmp/train-8b-12xh20-ib.log), with tee log [`/tmp/train-8b-12xh20-ib.log`](/tmp/train-8b-12xh20-ib.log).
+- `ray status --address=10.0.18.3:6379` now reports `2` active nodes and `12` total GPUs, with all `12` GPUs reserved by placement groups during worker initialization.
+- `trainer.log` confirms:
+  - `nnodes: 2`
+  - `n_gpus_per_node: 6`
+  - `fsdp_size: 6`
+  - `prompt_oversampling_factor: 1.0`
+  - `sample_oversampling_factor: 1.0`
+  - `server_url: http://10.0.18.3:18112`
+  - `NCCL_NET: IB`
+  - `test_freq: 0`
+  - `val_before_train: False`
+- Both nodes currently show `6` `ray::WorkerDict.actor_rollout_init_model` GPU processes on GPUs `0-5`, each at about `2168 MiB`, while GPUs `6-7` are not used by the current Ray training workers.
+- The latest logs show NCCL `Initialized NET plugin IB` and `Using network IB` on the active run.
+- No new `Traceback`, `RuntimeError`, or `AssertionError` has appeared in the active tee log at the latest check.
+- `Training Progress` is not yet visible; the run is still in distributed worker/model bring-up rather than failed.
+
 #### Local training profile selection moved to `.infra_profile.local.sh` and shared harness paths — COMPLETED
 
 ##### Problem & Impact
@@ -32,7 +291,7 @@
 - The generic 8B launcher no longer silently maps unsupported `a800 + single-node` requests onto the `16xA800` two-node launcher, and `start_training.sh --dry-run --profile a800 --single-node --train-script drkernel/kernel/scripts/rl/8b_trloo_hfsdp8_pytorch_eager.sh` now exits with a clear validation error.
 - Future upstream pulls no longer require local tracked-file edits just to switch between A800 and H20 in this repo.
 
-#### 8B H20 training switched from `16xH20` two-node IB to `8xH20` single-node with oversampling `1.0` — ACTIVE
+#### 8B H20 training switched from `16xH20` two-node IB to `8xH20` single-node with oversampling `1.0` — SUPERSEDED
 
 ##### Problem & Impact
 

@@ -2,6 +2,8 @@
 
 ## Runbooks And Handoffs
 
+- [`handoffs/in_progress/HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md`](handoffs/in_progress/HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md)
+  Root-cause handoff for the reward `/evaluate` long-tail stall where client-side synchronous waits hold tokens and stretch rollout steps into `50-60+ min`.
 - [`handoffs/in_progress/HANDOFF_ONLINE_W8A8.md`](handoffs/in_progress/HANDOFF_ONLINE_W8A8.md)
   Primary runbook for the online-quantization investigation.
 - [`handoffs/in_progress/HANDOFF_ENTROPY_COLLAPSE.md`](handoffs/in_progress/HANDOFF_ENTROPY_COLLAPSE.md)

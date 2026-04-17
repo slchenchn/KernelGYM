@@ -28,21 +28,25 @@ Use this skill for live or recent training runs in this repository when the user
 2. Generate plots first.
    - Use the canonical plotting entrypoint documented in `INDEX.md`.
    - Generate training plots alongside log inspection, and eval plots too if `eval_results` exists.
-3. Verify completion state, not only activity.
+3. Check timing explicitly, not only phase/state.
+   - Inspect training duration evidence from logs, generated plots, or both.
+   - At minimum, verify recent `timing_s/*` metrics or the latest step timing summary before claiming a run is healthy, stalled, or slower/faster than before.
+   - If step time changed materially, say which component changed most, such as `gen`, `update_actor`, or checkpoint save time.
+4. Verify completion state, not only activity.
    - Decide whether the current step truly completed or is only retrying, oversampling, or heartbeating.
    - Treat worker activity, queue activity, GPU utilization, and heartbeats as insufficient proof of completed progress.
-4. Separate these counters in every status report.
+5. Separate these counters in every status report.
    - successful visible train step
    - current in-flight step
    - retry / oversampling state
    - WandB run step or summary state
-5. Handle resumed runs carefully.
+6. Handle resumed runs carefully.
    - Do not treat local `wandb-summary.json` as live truth unless its freshness was verified explicitly.
    - If WandB is stale, broken, or disabled, say that directly.
-6. If evidence is partial, keep the uncertainty explicit.
+7. If evidence is partial, keep the uncertainty explicit.
    - State what is confirmed.
    - State what is still inference.
-7. If correcting an earlier interpretation, preserve the delta.
+8. If correcting an earlier interpretation, preserve the delta.
    - the earlier mistaken assumption
    - the evidence that invalidated it
    - the corrected conclusion
@@ -55,6 +59,7 @@ When answering a training-status question, explicitly report:
 - current in-flight step
 - retry / oversampling state
 - WandB state
+- recent step timing evidence and the main contributor to step duration
 
 Also state whether the run has made real new progress or is only active.
 

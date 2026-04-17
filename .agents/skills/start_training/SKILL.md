@@ -33,7 +33,10 @@ If the startup script is too hardcoded for the requested launch, fix the script 
      - `14b_coldstart_trloo_hfsdp8_pytorch_eager.sh`
      - `8b_trloo_hfsdp8_pytorch_eager.sh`
    - Prefer the compatibility wrapper such as `8b_trloo_hfsdp8_pytorch_eager.sh` unless the user explicitly requests a pinned hardware-specific variant.
-2. Validate launch prerequisites from the head node before starting.
+2. Validate launch prerequisites from the actual launch environment before starting.
+   - Use the same environment that the launcher will actually run under.
+   - For plain SSH profiles, this is usually the head-node shell environment.
+   - For `ssh-docker` or other containerized profiles, validate inside the activated container environment on every participating node, not just on the host and not just on the head node.
    - `which python`
    - `sys.executable`
    - `VIRTUAL_ENV`
@@ -98,6 +101,7 @@ If the startup script is too hardcoded for the requested launch, fix the script 
 
 - Current node, container, reward-endpoint, and transport facts belong in `SPEC.md`, not in this skill.
 - The orchestrator script reads the current training-target settings from `drkernel/kernel/scripts/rl/infra_common.sh`. Do not hardcode launch hosts, containers, or environment paths in this skill.
+- Do not treat a host-side Python check as sufficient for containerized launches. If the profile runs inside Docker, validate the activated Python environment inside the container on each participating node.
 - Prefer `.infra_profile.local.sh` or `--profile` over editing tracked default profile values in launcher or infra scripts.
 - If a user request cannot be expressed with the current startup script flags, modify `start_training.sh` rather than falling back immediately to ad hoc SSH orchestration.
 - Resumed runs share the old run directory, so old log content and new log content will coexist. Use the new process pid and fresh config dump to distinguish the resumed run from historical log lines.

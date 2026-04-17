@@ -110,12 +110,12 @@ KL_COEF=0.0
 TOTAL_EPOCHS=1000
 
 # =============================================================================
-# Infrastructure: single 8-GPU H20 node
+# Infrastructure: H20 topology defaults
 # =============================================================================
 NNODES="${NNODES:-1}"
-GPUS_PER_NODE=8
-SP_SIZE=4
-FSDP_SIZE=8    # 8-way FSDP intra-node, DP across nodes
+GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
+SP_SIZE="${SP_SIZE:-4}"
+FSDP_SIZE="${FSDP_SIZE:-8}"
 
 ROLLOUT_GPU_MEMORY_UTIL="${ROLLOUT_GPU_MEMORY_UTIL:-0.75}"
 ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE=1

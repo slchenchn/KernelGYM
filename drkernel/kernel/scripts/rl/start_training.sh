@@ -89,6 +89,7 @@ PY
 sanitize_name() {
     local raw="$1"
     raw="${raw%.sh}"
+    raw="${raw//./_}"
     raw="${raw//[^A-Za-z0-9._-]/-}"
     printf '%s\n' "$raw"
 }
@@ -107,6 +108,14 @@ get_env_override() {
         fi
     done
     return 1
+}
+
+count_csv_items() {
+    local csv="$1"
+    local IFS=','
+    local -a items=()
+    read -r -a items <<< "$csv"
+    printf '%s\n' "${#items[@]}"
 }
 
 wait_for_ray_ready() {
@@ -213,6 +222,22 @@ if [[ "${requested_nnodes}" == "1" ]]; then
     SINGLE_NODE=1
 fi
 
+requested_cuda_visible_devices="$(get_env_override TRAIN_CUDA_VISIBLE_DEVICES || get_env_override CUDA_VISIBLE_DEVICES || true)"
+if [[ -z "${requested_cuda_visible_devices}" ]]; then
+    requested_cuda_visible_devices="${TRAIN_CUDA_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-}}"
+fi
+
+requested_ray_num_gpus="$(get_env_override TRAIN_RAY_NUM_GPUS || get_env_override N_GPUS_PER_NODE || get_env_override GPUS_PER_NODE || true)"
+if [[ -z "${requested_ray_num_gpus}" && -n "${requested_cuda_visible_devices}" ]]; then
+    requested_ray_num_gpus="$(count_csv_items "${requested_cuda_visible_devices}")"
+fi
+RAY_NUM_GPUS="${requested_ray_num_gpus:-8}"
+
+ray_env_prefix=""
+if [[ -n "${requested_cuda_visible_devices}" ]]; then
+    ray_env_prefix="export CUDA_VISIBLE_DEVICES=$(shell_quote "${requested_cuda_visible_devices}") && "
+fi
+
 TRAIN_SCRIPT="$(resolve_path "$TRAIN_SCRIPT")"
 WORKDIR="$(resolve_path "$WORKDIR")"
 ENV_ACTIVATE_CMD="$(python_env_prelude)"
@@ -252,6 +277,9 @@ fi
 if [[ -n "${TRAIN_NCCL_IB_HCA}" ]]; then
     launcher_env+=("NCCL_IB_HCA=${TRAIN_NCCL_IB_HCA}")
 fi
+if [[ -n "${requested_cuda_visible_devices}" ]]; then
+    launcher_env+=("CUDA_VISIBLE_DEVICES=${requested_cuda_visible_devices}")
+fi
 launcher_env+=("${EXTRA_ENV[@]}")
 
 launch_cmd="${ENV_ACTIVATE_CMD} && cd $(shell_quote "$WORKDIR") &&"
@@ -272,6 +300,10 @@ if [[ "$DRY_RUN" = "1" ]]; then
     fi
     info "Training script: $TRAIN_SCRIPT"
     info "Cluster profile: ${TRAIN_CLUSTER_PROFILE}"
+    info "Ray GPUs per node: ${RAY_NUM_GPUS}"
+    if [[ -n "${requested_cuda_visible_devices}" ]]; then
+        info "CUDA_VISIBLE_DEVICES: ${requested_cuda_visible_devices}"
+    fi
     if [[ "$SINGLE_NODE" = "1" ]]; then
         info "Topology: single node (${HEAD_NODE})"
     else
@@ -309,7 +341,7 @@ echo ""
 info "=== Step 2: Starting Ray cluster ==="
 
 info "Starting Ray head on $(train_head_label)..."
-head_start_cmd="${ENV_ACTIVATE_CMD} && cd $(shell_quote "$WORKDIR") && ray stop --force >/dev/null 2>&1 || true && ray start --head --node-ip-address=${HEAD_NODE} --port=${RAY_HEAD_PORT} --num-gpus=8 --dashboard-host=0.0.0.0 >$(shell_quote "${HEAD_RAY_LOG}") 2>&1 && tail -f /dev/null"
+head_start_cmd="${ENV_ACTIVATE_CMD} && cd $(shell_quote "$WORKDIR") && ${ray_env_prefix}ray stop --force >/dev/null 2>&1 || true && ray start --head --node-ip-address=${HEAD_NODE} --port=${RAY_HEAD_PORT} --num-gpus=${RAY_NUM_GPUS} --dashboard-host=0.0.0.0 >$(shell_quote "${HEAD_RAY_LOG}") 2>&1 && tail -f /dev/null"
 head_output=$(run_on_train_head \
     "tmux kill-session -t $(shell_quote "${HEAD_RAY_SESSION}") 2>/dev/null || true; tmux new-session -d -s $(shell_quote "${HEAD_RAY_SESSION}") bash -lc $(shell_quote "${head_start_cmd}")" 2>&1)
 head_rc=$?
@@ -322,7 +354,7 @@ fi
 
 if [[ "$SINGLE_NODE" != "1" ]]; then
     info "Starting Ray worker on $(train_worker_label)..."
-    worker_start_cmd="${ENV_ACTIVATE_CMD} && cd $(shell_quote "$WORKDIR") && ray stop --force >/dev/null 2>&1 || true && ray start --address=${HEAD_NODE}:${RAY_HEAD_PORT} --num-gpus=8 >$(shell_quote "${WORKER_RAY_LOG}") 2>&1 && tail -f /dev/null"
+    worker_start_cmd="${ENV_ACTIVATE_CMD} && cd $(shell_quote "$WORKDIR") && ${ray_env_prefix}ray stop --force >/dev/null 2>&1 || true && ray start --address=${HEAD_NODE}:${RAY_HEAD_PORT} --num-gpus=${RAY_NUM_GPUS} >$(shell_quote "${WORKER_RAY_LOG}") 2>&1 && tail -f /dev/null"
     worker_output=$(run_on_train_worker \
         "tmux kill-session -t $(shell_quote "${WORKER_RAY_SESSION}") 2>/dev/null || true; tmux new-session -d -s $(shell_quote "${WORKER_RAY_SESSION}") bash -lc $(shell_quote "${worker_start_cmd}")" 2>&1)
     worker_rc=$?

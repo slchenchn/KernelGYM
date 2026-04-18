@@ -186,6 +186,34 @@ parse_reward_weights() {
   echo "Reward Weights - Compilation: $compilation, Correctness: $correctness, Performance: $performance"
 }
 
+resolve_repo_data_path_if_needed() {
+  local input_path="$1"
+
+  if [[ -z "$input_path" ]]; then
+    printf '%s' "$input_path"
+    return 0
+  fi
+
+  if [[ -e "$input_path" ]]; then
+    printf '%s' "$input_path"
+    return 0
+  fi
+
+  case "$input_path" in
+    */drkernel/data/*)
+      local suffix="${input_path#*/drkernel/data/}"
+      local candidate="${DRKERNEL_ROOT}/data/${suffix}"
+      if [[ -e "$candidate" ]]; then
+        echo "Info: remapped missing repo data path '$input_path' -> '$candidate'" >&2
+        printf '%s' "$candidate"
+        return 0
+      fi
+      ;;
+  esac
+
+  printf '%s' "$input_path"
+}
+
 show_help() {
   echo "Kernel Code Grading Script"
   echo ""
@@ -303,6 +331,8 @@ parse_arguments() {
 }
 
 setup_grading_environment() {
+  EVAL_DATASET="$(resolve_repo_data_path_if_needed "$EVAL_DATASET")"
+
   # Validate required parameters
   if [[ -z "$EVAL_DATASET" ]]; then
     echo "Error: --eval_dataset is required"

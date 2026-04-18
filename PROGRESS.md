@@ -1,5 +1,80 @@
 # Progress
 
+#### H20 checkpoint eval on `.3` now tolerates split-disk checkpoint storage and stale hardcoded validation-data paths, and the head-only two-GPU eval was relaunched on `CUDA_VISIBLE_DEVICES=6,7` — ACTIVE
+
+##### Problem & Impact
+
+- Head-only checkpoint eval for the active `8B` H20 run initially failed in two different ways:
+  - split-storage merge needed to stage missing rank shards from `.5`, but the helper path still used stdout capture and could hang the shell around `prepare_merge_local_dir`
+  - the eval launcher inherited a stale hardcoded validation-data path under the old `KernelGYM` repo root, so eval failed with `FileNotFoundError` even after merge succeeded
+- That blocked use of the remaining `.3` GPUs `6,7` for checkpoint testing while training still occupied `0-5`.
+
+##### Resolution
+
+- Updated [`merge_and_eval_checkpoints.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) so split-storage merge no longer depends on `merge_input_dir="$(prepare_merge_local_dir ...)"`.
+  - the helper now sets `PREPARED_MERGE_LOCAL_DIR` directly instead of returning its path through stdout capture
+  - staging logs remain on stderr so they do not pollute path handling
+- Updated [`grading_common.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/eval/grading_common.sh) with a repo-data remap helper that:
+  - detects missing old paths ending in `/drkernel/data/...`
+  - remaps them to the current worktree's `${DRKERNEL_ROOT}/data/...` when the corresponding file exists locally
+- Revalidated the current local validation dataset path:
+  - `/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/data/drkernel-validation-data/validation_data_thinking.parquet`
+- Relaunched checkpoint eval under tmux session `eval-8b-ckpt-gpu67` with:
+  - `CUDA_VISIBLE_DEVICES=6,7`
+  - `MERGE_CUDA_VISIBLE_DEVICES=6`
+  - `EVAL_USE_WORKER=0`
+  - `NNODES=1`
+  - `N_GPUS_PER_NODE=2`
+  - `REWARD_SERVER_URL=http://10.0.18.3:18112`
+
+##### Result & Current State
+
+- The new eval session is active on `.3` and is again processing the untested checkpoints `10 50 100 140`.
+- Training remains isolated on GPUs `0-5`; the eval relaunch is constrained to the remaining two GPUs.
+- The current live phase has progressed past both earlier failure boundaries:
+  - `Step 10` split-storage shard staging completed
+  - `Step 10` HF merge completed and wrote `huggingface_merged`
+  - `Step 10` eval is now live under `python -m kernel.main_grading`
+- No `metrics.json` has been written yet, so `step_10` is still in-flight rather than completed.
+
+#### Checkpoint eval now handles both shared-disk and split-disk training nodes by auto-staging missing FSDP merge inputs and syncing worker eval outputs back to the head-visible results tree — COMPLETED
+
+##### Problem & Impact
+
+- [`merge_and_eval_checkpoints.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) had been updated upstream for auto-discovery and GPU merge, but it still assumed one node could see a complete `actor/` checkpoint tree and a shared `eval_results/` tree locally.
+- That assumption breaks on the current split-disk H20 layout:
+  - `10.0.18.3` stores only rank `0-5` model shards plus rank-0 metadata
+  - `10.0.18.5` stores only rank `6-11` model shards
+  - worker-side eval outputs are not automatically visible from the head node
+- Without a mixed-storage fix, worker-side merge and summary logic would fail even though the same script still needs to remain valid for shared-disk machines.
+
+##### Resolution
+
+- Fast-forwarded the worktree to the latest remote branch state before changing the script, so the fix builds on the current auto-discovery / GPU-merge flow instead of overwriting it.
+- Reworked [`merge_and_eval_checkpoints.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) so it now:
+  - auto-detects whether the target node already has a complete local FSDP merge input set
+  - stages missing `model_world_size_*_rank_*.pt` files from the peer node into a temporary local merge dir when storage is split
+  - stages rank-0 merge metadata (`fsdp_config.json` and `huggingface/`) from the head node when the worker does not have it locally
+  - creates and cleans eval artifacts on the node that actually runs the eval
+  - copies worker-side `eval_results/step_*` outputs back to the head-visible results tree before local summary generation
+  - remains sourceable for targeted helper testing instead of forcing immediate script execution on `source`
+- Verified the live H20 split-storage facts through the new helpers:
+  - `world_size=12`
+  - head metadata present, worker metadata absent
+  - head merge inputs incomplete, worker merge inputs incomplete
+  - head ranks `0-5`, worker ranks `6-11`
+- Smoke-tested the new cross-node tar copy path in both directions:
+  - head metadata copy into a worker temp dir
+  - worker result-dir copy back into a head temp dir
+
+##### Result & Current State
+
+- The checkpoint-eval merge path now supports both environments:
+  - shared-disk nodes keep using local actor dirs directly
+  - split-disk nodes auto-stage the missing merge inputs per step before merge
+- Worker-side eval results no longer disappear from the head-side summary path on split storage.
+- Validation completed with `bash -n` plus live helper smoke tests on the `h20` profile.
+
 #### The `14B` A800 eager run is active on `50/51` with IB, validation disabled, and checkpoint eval isolated to `.18` — ACTIVE
 
 ##### Problem & Impact

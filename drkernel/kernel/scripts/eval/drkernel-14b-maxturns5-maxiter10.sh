@@ -96,9 +96,9 @@ CUSTOM_REWARD_NAME="compute_kernel_reward_batch"
 # System Configuration
 # Will use environment variables if available
 # NNODES=${ARNOLD_WORKER_NUM:-1}
-NNODES=1
+NNODES=${NNODES:-1}
 # N_GPUS_PER_NODE=${ARNOLD_WORKER_GPU:-1}
-N_GPUS_PER_NODE=8
+N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
 
 # Qwen3 chat template fix (if needed)
 FIX_QWEN3_CHAT_TEMPLATE=False

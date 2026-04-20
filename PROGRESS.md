@@ -155,7 +155,7 @@
 - `global_step_270` also completed in the same `.18` checkpoint-eval thread.
 - The later `.18` `step_260` eval was interrupted when reward was restarted for the new `time_coverage` rollout, so `.18` is no longer the active workstream right now.
 
-#### H20 checkpoint eval on `.3` now tolerates split-disk checkpoint storage and stale hardcoded validation-data paths while staying isolated to `CUDA_VISIBLE_DEVICES=6,7` — ACTIVE
+#### H20 checkpoint eval on `.3` now tolerates split-disk checkpoint storage and stale hardcoded validation-data paths while staying isolated to `CUDA_VISIBLE_DEVICES=6,7` — SUPERSEDED
 
 ##### Problem & Impact
 
@@ -174,23 +174,59 @@
   - remaps them to the current worktree's `${DRKERNEL_ROOT}/data/...` when the corresponding file exists locally
 - Revalidated the current local validation dataset path:
   - `/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/data/drkernel-validation-data/validation_data_thinking.parquet`
-- Ran checkpoint eval under tmux session `eval-8b-ckpt-gpu67` with:
+- The first relaunch showed two additional runtime mismatches that were not covered by the earlier merge/data-path fixes:
+  - the task-specific eval script overrode `N_GPUS_PER_NODE=8`, so the eval attached to the live training Ray cluster and waited forever on an impossible `8 GPU` placement group
+  - once eval was moved onto its own local Ray session, the task-specific network block still hardcoded `GLOO_SOCKET_IFNAME=ens22f0`, which does not exist in this container, so local single-node actor initialization died in `torch.distributed.init_process_group()`
+- Resolved both runtime mismatches in code:
+  - task-specific eval scripts now keep their `8 GPU` behavior as the default but honor externally supplied `NNODES` / `N_GPUS_PER_NODE` overrides
+  - [`main_grading.py`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/main_grading.py) now honors `RAY_ADDRESS` explicitly when initializing Ray
+  - [`merge_and_eval_checkpoints.sh`](/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) now defaults checkpoint eval to `EVAL_RAY_ADDRESS=local` and injects `GLOO_SOCKET_IFNAME` / `NCCL_SOCKET_IFNAME` from `EVAL_SOCKET_IFNAME` when using local Ray
+  - the relevant eval task scripts now allow their network-interface exports to be overridden instead of hardcoding `ens22f0`
+- Relaunched checkpoint eval under tmux session `eval-8b-ckpt-gpu67` with:
   - `CUDA_VISIBLE_DEVICES=6,7`
   - `MERGE_CUDA_VISIBLE_DEVICES=6`
   - `EVAL_USE_WORKER=0`
   - `NNODES=1`
   - `N_GPUS_PER_NODE=2`
   - `REWARD_SERVER_URL=http://10.0.18.3:18112`
+  - `EVAL_RAY_ADDRESS=local`
+  - `EVAL_SOCKET_IFNAME=lo`
 
 ##### Result & Current State
 
-- The new eval session is active on `.3` and is again processing the untested checkpoints `10 50 100 140`.
-- Training remains isolated on GPUs `0-5`; the eval is constrained to the remaining two GPUs.
-- The current live phase has progressed past both earlier failure boundaries:
-  - `Step 10` split-storage shard staging completed
-  - `Step 10` HF merge completed and wrote `huggingface_merged`
-  - `Step 10` eval is now live under `python -m kernel.main_grading`
-- No `metrics.json` has been written yet, so `step_10` is still in-flight rather than completed.
+- Training remains isolated on GPUs `0-5`; the eval relaunch is constrained to the remaining two GPUs.
+- The current live phase has now progressed past all earlier failure boundaries for `step_10`:
+  - split-storage shard staging completed
+  - HF merge completed and wrote `huggingface_merged`
+  - the relaunched eval is now running under a separate local Ray session instead of the training cluster
+  - the local Ray session now advertises `GPU,2` and the live `main_grading` command line shows `trainer.n_gpus_per_node=2`
+  - the local single-node eval no longer crashes on `ens22f0`
+- Current live state:
+  - `step_10` is again in-flight under `python -m kernel.main_grading`
+  - GPUs `6,7` now show non-zero memory use from the isolated eval path
+  - `metrics.json` is still not written yet, so `step_10` is not complete
+- A later operator action removed the `step_10` eval-result directory, so the in-progress follow-up queue for `50/100/140` was interrupted and `.3` GPUs `6,7` were reassigned back to a fresh `step_10` rerun.
+- That rerun did not actually reach merge/eval:
+  - head `.3` still has `global_step_10/actor`
+  - worker `.5` no longer has `global_step_10/actor`
+  - because this run uses split-storage FSDP checkpoints, the rerun failed during shard staging from `.5` and exited with `Step 10: failed to assemble a complete local merge dir`
+- Current diagnosis: `step_10` cannot be re-evaluated from the current checkpoint tree unless the missing worker-side `global_step_10` shards are restored or copied back.
+- After confirming that `global_step_50` still exists on both `.3` and `.5`, checkpoint eval was switched to `step_50` on `.3` GPUs `6,7` under the same isolated local-Ray configuration.
+- Current live state has progressed past split-storage staging and GPU merge for `step_50`:
+  - the orchestrator log reached `Step 50: starting eval...`
+  - `kernel.main_grading` is alive under a local Ray session with `trainer.n_gpus_per_node=2`
+  - Ray worker logs show async rollout workers launching, Gloo rank formation succeeding, and checkpoint shard loading beginning
+  - `step_50` has now completed and wrote `metrics.json`, `graded_results.parquet`, `graded_results_conversations.jsonl`, and `raw_responses.jsonl`
+  - summary metrics currently recorded are `pass@1=0.4767`, `correct=0.3025`, `compile=0.8804`, `fast@1=0.2175`, `fast@1.2=0.1475`
+  - the eval tmux session has exited and `.3` GPUs `6,7` are idle again
+- After `step_50` completed, the remaining recoverable checkpoints `100` and `140` were relaunched on `.3` GPUs `6,7` under the same isolated local-Ray configuration.
+- Those remaining checkpoint evals have now completed and written full artifacts for both `step_100` and `step_140`.
+- Current recorded metrics are:
+  - `step_100`: `pass@1=0.5100`, `correct=0.3725`, `compile=0.8917`, `fast@1=0.2562`, `fast@1.2=0.1588`
+  - `step_140`: `pass@1=0.5433`, `correct=0.3987`, `compile=0.8654`, `fast@1=0.2675`, `fast@1.2=0.1625`
+- The eval session has exited and `.3` GPUs `6,7` are idle again.
+- After those completed, a fresh queue for the new checkpoints `150 160 170 180 190 200 210` was launched on `.3` GPUs `6,7` under the same isolated local-Ray configuration.
+- Current live state has moved to `step_150` split-storage staging in tmux session `eval-8b-ckpt-gpu67`; the current orchestrator log is `orchestrator.20260419-063317.head-gpu67-step150-210.log`.
 
 #### Checkpoint eval now handles both shared-disk and split-disk training nodes by auto-staging missing FSDP merge inputs and syncing worker eval outputs back to the head-visible results tree — COMPLETED
 

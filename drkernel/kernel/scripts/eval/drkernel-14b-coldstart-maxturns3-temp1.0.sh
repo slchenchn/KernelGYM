@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # --- 2-node network configuration (matches run_train_bf16_2node.sh) ---
-export GLOO_SOCKET_IFNAME=ens22f0
-export NCCL_SOCKET_IFNAME=ens22f0
-export NCCL_NET=Socket
-export NCCL_IB_DISABLE=1
-export NCCL_SOCKET_FAMILY=AF_INET
-export NCCL_DEBUG=WARN
-export VLLM_DISABLED_KERNELS=AllSparkLinearKernel
+export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-ens22f0}"
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ens22f0}"
+export NCCL_NET="${NCCL_NET:-Socket}"
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+export NCCL_SOCKET_FAMILY="${NCCL_SOCKET_FAMILY:-AF_INET}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+export VLLM_DISABLED_KERNELS="${VLLM_DISABLED_KERNELS:-AllSparkLinearKernel}"
 # --- end 2-node network configuration ---
 
 
@@ -90,9 +90,9 @@ CUSTOM_REWARD_NAME="compute_kernel_reward_batch"
 # System Configuration
 # Will use environment variables if available
 # NNODES=${ARNOLD_WORKER_NUM:-1}
-NNODES=1
+NNODES=${NNODES:-1}
 # N_GPUS_PER_NODE=${ARNOLD_WORKER_GPU:-1}
-N_GPUS_PER_NODE=8
+N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-8}
 
 # Qwen3 chat template fix (if needed)
 FIX_QWEN3_CHAT_TEMPLATE=False

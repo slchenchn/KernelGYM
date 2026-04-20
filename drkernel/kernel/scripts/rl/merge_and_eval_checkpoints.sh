@@ -44,6 +44,8 @@ init_env() {
     EVAL_USE_WORKER="${EVAL_USE_WORKER:-1}"
     EVAL_KEEP_MERGED="${EVAL_KEEP_MERGED:-0}"
     EVAL_CLEANUP_KILL_GPU_PIDS="${EVAL_CLEANUP_KILL_GPU_PIDS:-0}"
+    EVAL_RAY_ADDRESS="${EVAL_RAY_ADDRESS:-local}"
+    EVAL_SOCKET_IFNAME="${EVAL_SOCKET_IFNAME:-lo}"
     MERGE_CUDA_VISIBLE_DEVICES="${MERGE_CUDA_VISIBLE_DEVICES:-0}"
     MERGE_STAGE_DIR_BASENAME="${MERGE_STAGE_DIR_BASENAME:-.fsdp_merge_stage}"
 }
@@ -475,8 +477,13 @@ run_evals_on_node() {
         }
 
         info "[${node_name}] Step ${step}: starting eval..."
+        local eval_prefix="RAY_ADDRESS='${EVAL_RAY_ADDRESS}'"
+        if [[ "${EVAL_RAY_ADDRESS}" == "local" ]]; then
+            eval_prefix="GLOO_SOCKET_IFNAME='${EVAL_SOCKET_IFNAME}' NCCL_SOCKET_IFNAME='${EVAL_SOCKET_IFNAME}' ${eval_prefix}"
+        fi
+
         run_on_target "${target}" \
-            "${ENV_ACTIVATE_CMD} && cd ${VLLM018_PATH}/drkernel && bash kernel/scripts/eval/${EVAL_SCRIPT_NAME} \
+            "${ENV_ACTIVATE_CMD} && cd ${VLLM018_PATH}/drkernel && ${eval_prefix} bash kernel/scripts/eval/${EVAL_SCRIPT_NAME} \
             --model_path ${hf_dir} \
             --model_name step_${step} \
             --output_path ${output_dir}/graded_results.parquet \

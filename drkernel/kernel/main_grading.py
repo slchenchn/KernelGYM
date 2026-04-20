@@ -904,8 +904,14 @@ def main(config):
 
 def run_generation(config):
     if not ray.is_initialized():
-        # this is for local ray cluster
-        ray.init(runtime_env={'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}})
+        ray_address = os.environ.get("RAY_ADDRESS")
+        ray_init_kwargs = {
+            "runtime_env": {"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN"}}
+        }
+        if ray_address:
+            ray_init_kwargs["address"] = ray_address
+            print(f"Using ray.init(address={ray_address!r})")
+        ray.init(**ray_init_kwargs)
 
     return ray.get(main_task.remote(config))
 

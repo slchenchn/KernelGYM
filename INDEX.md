@@ -4,6 +4,8 @@
 
 - [`handoffs/in_progress/HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md`](handoffs/in_progress/HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md)
   Root-cause handoff for the reward `/evaluate` long-tail stall where client-side synchronous waits hold tokens and stretch rollout steps into `50-60+ min`.
+- [`handoffs/in_progress/HANDOFF_REWARD_ENV_ROBUSTNESS.md`](handoffs/in_progress/HANDOFF_REWARD_ENV_ROBUSTNESS.md)
+  Root-cause and hardening handoff for reward-host GPU faulting, `Xid 109` escalation, reboot-triggered outages, and concrete robustness actions for `39/40`.
 - [`handoffs/in_progress/HANDOFF_QUANTIZED_ROLLOUT.md`](handoffs/in_progress/HANDOFF_QUANTIZED_ROLLOUT.md)
   Primary runbook for the online-quantization investigation, including the active `W8A8` ladder and the preserved `W8A16` packing-format branch.
 - [`handoffs/in_progress/HANDOFF_ENTROPY_COLLAPSE.md`](handoffs/in_progress/HANDOFF_ENTROPY_COLLAPSE.md)

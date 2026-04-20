@@ -12,11 +12,21 @@
 - Recomputed the available checkpoint set from on-disk state and ran dedicated `.18` eval for `10/20/30`.
 - Read the per-turn eval artifacts and confirmed repeated reward connectivity failures (`Connection refused` and `No route to host`).
 - Checked `192.168.16.39` and `192.168.16.40` directly and confirmed both reward containers were down after host-level reboot; neither restarted automatically because they were configured with `restart=no`.
+- Traced the reboot trigger and the underlying GPU fault signature:
+  - both hosts entered a clean `systemd` reboot sequence immediately after `root` SSH login from `192.168.120.100`
+  - previous-boot NVIDIA logs show real `Xid 109` (`CTX SWITCH TIMEOUT`) events on multiple GPUs across both hosts
+  - those `Xid 109` events are surrounded by large volumes of `Xid 13` / `Xid 31` / occasional `Xid 43` from `python3`
+  - the detailed fault strings are dominated by `MMU Fault`, `MMU NACK Errors`, `Out Of Range Address`, and `Invalid Address Space`
 
 ##### Result & Current State
 
 - Early eval outputs for run `20260419-131619` should be treated as contaminated by reward outage rather than as clean model-quality signals.
 - Reward recovery on `39/40` is the gating item for trustworthy fresh-run eval, not `.18` GPU availability.
+- Current evidence points to reward-workload GPU faulting rather than one isolated bad card:
+  - `.39` logged `Xid 109` on `GPU 7` (`PCI d6:00`) and `GPU 6` (`PCI d5:00`)
+  - `.40` logged `Xid 109` on `GPU 1/3/4/6/7` (`PCI 52:00, 57:00, ce:00, d5:00, d6:00`)
+  - the same signature has recurred across earlier `kern.log` history on both hosts
+  - this is more consistent with generated-kernel evaluation provoking illegal-address / MMU-fault chains that escalate into context-switch timeout than with a single physically defective GPU
 
 #### Historical `20260409-092519` checkpoint coverage now uses per-step `metrics.json` as the source of truth
 

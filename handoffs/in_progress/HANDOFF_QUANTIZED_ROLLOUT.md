@@ -1,11 +1,17 @@
-# Online W8A8 Rollout Handoff
+# Online Quantized Rollout Handoff
 
 ## Goal
 
-Make `vllm==0.18.0` + `compressed-tensors` + online `W8A8` rollout work in RL training on the `KernelGYM-vllm018` worktree with:
+Track the active online-quantization rollout investigation on `vllm==0.18.0` + `compressed-tensors` in the `KernelGYM-vllm018` worktree.
+
+The primary active line is still `W8A8`, but this handoff also records the parallel `W8A16` branch because the two ladders share codepaths, launcher assumptions, and interpretation traps.
+
+Current objectives:
+- make online `W8A8` rollout work in RL training with:
 - no hallmark output corruption
 - at least one visible completed train step
 - a reproducible debug ladder from minimal clean generation to the current full-restore failure
+- preserve the `W8A16` investigation state so the packing-format blocker is not lost
 
 ## Fast Start
 
@@ -36,6 +42,7 @@ Persistent jobs must run under `tmux`.
    - `RuntimeError: split_size must be a positive integer, but got 0`
 3. A separate exported-model bug was fixed: static exported rollout checkpoints were previously assembled incorrectly and were unusable because duplicate tensor names caused vLLM to overwrite correct quantized weights with base float weights.
 4. Important interpretation correction: the Quarot `transformed_model` used in this ladder is a bf16 checkpoint, not a pre-quantized vLLM checkpoint. `W8A8` init passes because `weight` key names still match and vLLM tolerates missing auxiliary quant tensors such as `weight_scale`; do not treat init success as proof that the pre-sync engine state is semantically correct.
+5. The parallel `W8A16` line is still blocked for a different reason: the engine runs, but Marlin-path output is gibberish, which currently points to a `weight_packed` / packing-format mismatch rather than the `W8A8` trainer-side zero-batch failure.
 
 ## Reproduction Ladder
 
@@ -232,6 +239,127 @@ Then rerun:
 - [run_formal_w8a8_noqkv_fullrestore_quarot.sh](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/run_formal_w8a8_noqkv_fullrestore_quarot.sh)
 
 That is the shortest path to answering why the formally restored Quarot line still cannot complete `step 1`.
+
+## Parallel W8A16 Branch
+
+### Status
+
+`W8A16` per-channel INT8 weight-only online quantization is unblocked through init and device-placement failures, but the live rollout output is still wrong. The current best explanation is a Marlin packing-format mismatch in the `weight_packed` path.
+
+### Evidence of the current failure
+
+Validated bad-output run:
+- `drkernel/logs/trloo-14b.train.8XA800.reward.16x4090.bf16.spare2.refcache.20260330-024304/`
+
+Observed symptoms:
+- generated text is gibberish rather than coherent code or conversation
+- `model_logprob_mean` is around `-7.12` rather than the expected roughly `-1` to `-2` range for coherent text
+- `code_block_count=0`
+
+Interpretation:
+- the engine initializes
+- weights are accepted
+- Marlin repack runs
+- tokens are generated
+- but the final numeric interpretation of packed weights is wrong
+
+### Why W8A16 is harder than W8A8
+
+| | W8A8 (`CompressedTensorsW8A8Int8`) | W8A16 (`CompressedTensorsWNA16`) |
+|---|---|---|
+| Format | `int-quantized` | `pack-quantized` |
+| Weight param name | `weight` | `weight_packed` |
+| Weight dtype | int8 | int32 packing 4 int8 values |
+| Kernel | CUTLASS int8 GEMM | Marlin / AllSpark with repack |
+| Init from bf16 checkpoint | works because `weight` key matches | fails without dummy init because `weight` and `weight_packed` do not match |
+| Weight sync | direct int8 tensor sync | int8 to packed int32 plus shape / scale metadata then Marlin repack |
+
+`W8A8` works because the runtime still consumes a normal `weight` tensor name and tolerates missing auxiliary quant tensors during init. `W8A16` depends on a much more fragile pack-and-repack pipeline.
+
+### W8A16 issues already fixed
+
+1. Init-time checkpoint mismatch:
+   `WNA16` registers `weight_packed` while the bf16 checkpoint only has `weight`.
+   Fix: use `load_format=dummy` for the `W8A16` preset so engine construction does not try to bind bf16 checkpoint tensors directly.
+
+2. `process_weights_after_loading` on CPU during dummy init:
+   AllSpark and Marlin repack require CUDA, but dummy init originally hit the CPU path.
+   Fix: gate vLLM `process_weights_after_loading` behind `KERNELGYM_SKIP_QUANT_PROCESS_WEIGHTS=1` and defer repack to live sync.
+
+3. Env vars not reaching the standalone EngineCore subprocess:
+   The async standalone engine path overwrote inherited env with a small explicit `runtime_env`.
+   Fix: propagate `KERNELGYM_SKIP_QUANT_PROCESS_WEIGHTS` and `VLLM_DISABLED_KERNELS` through the standalone `runtime_env` and PPO Ray passthrough env list.
+
+4. Layerwise reload still calling `process_weights_after_loading` on CPU:
+   The first weight sync hit `_layerwise_process` without a CUDA loading context.
+   Fix: wrap the vLLM layerwise call in `device_loading_context(layer, cuda)` before `process_weights_after_loading`.
+
+5. AllSpark selected before Marlin on A800:
+   Kernel priority originally chose AllSpark on Ampere.
+   Fix: set `VLLM_DISABLED_KERNELS=AllSparkLinearKernel` to force the Marlin path.
+
+### Current W8A16 blocker
+
+All init, env, and device-placement failures appear resolved. The remaining blocker is likely in the packing convention supplied to Marlin.
+
+What we currently produce:
+1. `quantize_linear_weight_rtn()` gives a per-channel int8 tensor `[out_features, in_features]`
+2. `pack_int8_to_packed_int32()` packs four uint8 values into one int32 element
+3. `weight_scale` is emitted as float32 `[out_features, 1]`
+4. `weight_shape` is emitted to preserve original dimensions
+5. those tensors are sent into EngineCore and then through Marlin repack
+
+What may still be wrong relative to Marlin expectations:
+- packing along the wrong dimension
+- wrong byte order inside the int32 packing
+- wrong `weight_scale` shape or orientation
+- wrong `PackedvLLMParameter` metadata assumptions during layout permutation
+
+### W8A16 code changes already made
+
+In this repo:
+- `online_quant_utils.py`
+  - `format: pack-quantized` for `W8A16`
+  - `load_format=dummy`
+  - `KERNELGYM_SKIP_QUANT_PROCESS_WEIGHTS=1`
+  - `pack_int8_to_packed_int32`
+  - disable AllSpark
+- `fsdp_vllm.py`
+  - `W8A16` live sync now emits `weight_packed`, `weight_scale`, and `weight_shape`
+  - forces CUDA materialization before handoff
+- `async_server.py`
+  - propagates `KERNELGYM_SKIP_QUANT_PROCESS_WEIGHTS` and `VLLM_DISABLED_KERNELS`
+- `constants_ppo.py`
+  - adds those env vars to Ray passthrough
+- `run_train_bf16.sh`
+  - `VAL_BEFORE_TRAIN` respects env override
+- `run_train_bf16_2node.sh`
+  - `VAL_BEFORE_TRAIN` and `ENFORCE_EAGER` respect env override
+  - forces `VLLM_DISABLED_KERNELS=AllSparkLinearKernel`
+
+In the installed vLLM package in `.venv-vllm0180`:
+- `model_executor/model_loader/utils.py`
+  - skips `process_weights_after_loading` when `KERNELGYM_SKIP_QUANT_PROCESS_WEIGHTS=1`
+- `model_executor/model_loader/reload/layerwise.py`
+  - wraps the call with `device_loading_context(layer, cuda)`
+
+### Highest-value next steps for W8A16
+
+1. Verify the exact GPTQ-style int8 to int32 packing convention Marlin expects.
+2. Check whether packing must be along the transposed dimension before `permute_param_layout_`.
+3. Validate `PackedvLLMParameter` metadata assumptions such as `packed_dim` and `packed_factor`.
+4. Compare against a known-good GPTQ-style INT8 checkpoint rather than only the online-generated packed tensors.
+
+Pragmatic fallback:
+- if `W8A16` is not strictly required, `W8A8` remains the practical line because it already produces coherent text and avoids the Marlin packing trap.
+
+### Key W8A16 runs
+
+| Run | Config | Result |
+|---|---|---|
+| `...bf16.spare2.refcache.20260330-024304` | 1-node, `W8A16`, val | engines run, output is gibberish |
+| `...bf16.2node.hybrid.20260330-021854` | 2-node, `W8A16`, standalone | EngineCore CPU error before the later layerwise fix |
+| `...bf16.2node.hybrid.20260329-042556` | 2-node bf16 baseline | working non-quantized baseline |
 
 ## Useful Scripts
 

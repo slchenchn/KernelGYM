@@ -17,7 +17,7 @@ Put those details in `SPEC.md` or a dedicated runbook instead.
 ## Runbooks
 
 - For the `KernelGYM-vllm018` online-quantization investigation, use
-  `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/handoffs/in_progress/HANDOFF_ONLINE_W8A8.md`
+  `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/handoffs/in_progress/HANDOFF_QUANTIZED_ROLLOUT.md`
   as the primary handoff / reproduction document.
 
 ## Harness Files

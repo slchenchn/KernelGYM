@@ -4,14 +4,14 @@
 
 - [`handoffs/in_progress/HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md`](handoffs/in_progress/HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md)
   Root-cause handoff for the reward `/evaluate` long-tail stall where client-side synchronous waits hold tokens and stretch rollout steps into `50-60+ min`.
-- [`handoffs/in_progress/HANDOFF_ONLINE_W8A8.md`](handoffs/in_progress/HANDOFF_ONLINE_W8A8.md)
-  Primary runbook for the online-quantization investigation.
+- [`handoffs/in_progress/HANDOFF_QUANTIZED_ROLLOUT.md`](handoffs/in_progress/HANDOFF_QUANTIZED_ROLLOUT.md)
+  Primary runbook for the online-quantization investigation, including the active `W8A8` ladder and the preserved `W8A16` packing-format branch.
 - [`handoffs/in_progress/HANDOFF_ENTROPY_COLLAPSE.md`](handoffs/in_progress/HANDOFF_ENTROPY_COLLAPSE.md)
   Entropy-collapse investigation, MRS/PRS interpretation, and likely root-cause notes.
-- [`handoffs/in_progress/HANDOFF_UNCOMMITTED_CHANGESET_REVIEW.md`](handoffs/in_progress/HANDOFF_UNCOMMITTED_CHANGESET_REVIEW.md)
-  Review summary for the current accumulated uncommitted changes and recommended commit split.
 - [`handoffs/completed/HANDOFF_REMOTE_TRAIN_LOCAL_REWARD.md`](handoffs/completed/HANDOFF_REMOTE_TRAIN_LOCAL_REWARD.md)
   Completed report for the relay-based remote-cloud training and local reward topology.
+- [`handoffs/completed/HANDOFF_2NODE_ROLLOUT.md`](handoffs/completed/HANDOFF_2NODE_ROLLOUT.md)
+  Historical benchmark note for the completed 2026-03 14B two-node A800 rollout investigation; useful for archived performance conclusions, not as a current launch runbook.
 - [`handoffs/completed/HANDOFF_RELEASE_3A84417_DIFF.md`](handoffs/completed/HANDOFF_RELEASE_3A84417_DIFF.md)
   Diff summary between the official release commit and local training codepaths.
 

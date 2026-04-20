@@ -272,7 +272,13 @@ class AsyncKernelRewardManager:
         num_custom_kernel = results.get("num_custom_kernel", 0)
         num_total_kernels = results.get("num_total_kernels", 0)
         custom_kernel_cuda_time_in_profiling_us = results.get("custom_kernel_cuda_time_in_profiling_us", 0)
-        total_kernel_run_time_in_profiling_us = results.get("total_kernel_run_time_in_profiling_us", 0)
+        total_kernel_run_time_in_profiling_us = results.get(
+            "total_kernel_cuda_time_in_profiling_us",
+            results.get("total_kernel_run_time_in_profiling_us", 0),
+        )
+        total_kernel_run_time_in_profiling_us_cpu_cuda = results.get(
+            "total_kernel_run_time_in_profiling_us_cpu_cuda", 0
+        )
         correctness = results.get("correctness", False)
         success = results.get("success", False)
         compiled = results.get("compiled", False)
@@ -316,6 +322,10 @@ class AsyncKernelRewardManager:
         reward_extra_info["num_coverage"] = float(f"{num_coverage:.2f}")
         reward_extra_info["custom_kernel_cuda_time_in_profiling_us"] = custom_kernel_cuda_time_in_profiling_us
         reward_extra_info["total_kernel_run_time_in_profiling_us"] = total_kernel_run_time_in_profiling_us
+        reward_extra_info["total_kernel_cuda_time_in_profiling_us"] = total_kernel_run_time_in_profiling_us
+        reward_extra_info["total_kernel_run_time_in_profiling_us_cpu_cuda"] = (
+            total_kernel_run_time_in_profiling_us_cpu_cuda
+        )
         time_coverage = 0
         if total_kernel_run_time_in_profiling_us > 0:
             time_coverage = custom_kernel_cuda_time_in_profiling_us / total_kernel_run_time_in_profiling_us

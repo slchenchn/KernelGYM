@@ -58,7 +58,9 @@ REWARD_KEYWORDS = (
     "num_custom_kernel",
     "num_total_kernels",
     "custom_kernel_cuda_time_in_profiling_us",
+    "total_kernel_cuda_time_in_profiling_us",
     "total_kernel_run_time_in_profiling_us",
+    "total_kernel_run_time_in_profiling_us_cpu_cuda",
     "Decoy kernel is not found",
 )
 

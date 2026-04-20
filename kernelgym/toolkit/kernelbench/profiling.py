@@ -32,7 +32,11 @@ def compute_triton_kernel_coverage(matched_triton_kernels: List[str], profilling
 
     kernels_in_profiling = profilling_result["kernels"]
 
-    total_time = 0.0
+    # `time_coverage` is intended to measure matched custom-kernel CUDA time as a
+    # fraction of total CUDA kernel time. Keep a separate CPU+CUDA total only for
+    # diagnostics so reward-side coverage is not artificially diluted by host time.
+    total_cuda_time = 0.0
+    total_cpu_cuda_time = 0.0
     matched_cuda_time = 0.0
     triton_kernels_in_profiling = []
 
@@ -40,7 +44,8 @@ def compute_triton_kernel_coverage(matched_triton_kernels: List[str], profilling
         prof_name = prof_kernel["name"]
         cuda_time = float(prof_kernel["cuda_time_us"])
         cpu_time = float(prof_kernel["cpu_time_us"])
-        total_time += cuda_time + cpu_time
+        total_cuda_time += cuda_time
+        total_cpu_cuda_time += cuda_time + cpu_time
 
         if any(_matches_profiler_name(kernel_name, prof_name) for kernel_name in kernel_names):
             triton_kernels_in_profiling.append(prof_name)
@@ -56,7 +61,11 @@ def compute_triton_kernel_coverage(matched_triton_kernels: List[str], profilling
     return {
         "num_custom_kernels": num_custom_kernels,
         "num_total_kernels": len(kernels_in_profiling),
-        "total_kernel_run_time_in_profiling_us": total_time,
+        # Preserve the historical field name, but fix its semantics to mean
+        # total CUDA time only so downstream `time_coverage` is CUDA/CUDA.
+        "total_kernel_run_time_in_profiling_us": total_cuda_time,
+        "total_kernel_cuda_time_in_profiling_us": total_cuda_time,
+        "total_kernel_run_time_in_profiling_us_cpu_cuda": total_cpu_cuda_time,
         "custom_kernel_cuda_time_in_profiling_us": matched_cuda_time,
         "triton_kernels_not_in_profiling": triton_kernels_not_in_profiling,
         "triton_kernels_in_profiling": triton_kernels_in_profiling,

@@ -89,7 +89,9 @@ class KernelEvaluationResult:
             "num_total_kernels",
             "triton_profiler_matches",
             "custom_kernel_cuda_time_in_profiling_us",
+            "total_kernel_cuda_time_in_profiling_us",
             "total_kernel_run_time_in_profiling_us",
+            "total_kernel_run_time_in_profiling_us_cpu_cuda",
             "custom_kernel_cuda_time_coverage",
         ):
             if key in metadata and metadata[key] is not None and not isinstance(

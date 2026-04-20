@@ -364,7 +364,13 @@ class KernelRewardClient:
         num_custom_kernel = _get_field("num_custom_kernels", "num_custom_kernel")
         num_total_kernels = _get_field("num_total_kernels", "num_total_kernel", "num_total_kernels")
         custom_kernel_cuda_time_in_profiling_us = _get_field("custom_kernel_cuda_time_in_profiling_us")
-        total_kernel_run_time_in_profiling_us = _get_field("total_kernel_run_time_in_profiling_us")
+        total_kernel_cuda_time_in_profiling_us = _get_field(
+            "total_kernel_cuda_time_in_profiling_us",
+            "total_kernel_run_time_in_profiling_us",
+        )
+        total_kernel_run_time_in_profiling_us_cpu_cuda = _get_field(
+            "total_kernel_run_time_in_profiling_us_cpu_cuda"
+        )
 
         # Only log keys once when all fields are missing to aid debugging.
         if (
@@ -386,8 +392,10 @@ class KernelRewardClient:
 
 
         time_coverage = 0
-        if total_kernel_run_time_in_profiling_us > 0:
-            time_coverage = custom_kernel_cuda_time_in_profiling_us / total_kernel_run_time_in_profiling_us
+        if total_kernel_cuda_time_in_profiling_us > 0:
+            time_coverage = (
+                custom_kernel_cuda_time_in_profiling_us / total_kernel_cuda_time_in_profiling_us
+            )
 
         if self.reward_config.coverage_reward.reward_type == "time_coverage":
             coverage = time_coverage
@@ -401,7 +409,9 @@ class KernelRewardClient:
             "num_custom_kernel": num_custom_kernel,
             "num_total_kernels": num_total_kernels,
             "custom_kernel_cuda_time_in_profiling_us": custom_kernel_cuda_time_in_profiling_us,
-            "total_kernel_run_time_in_profiling_us": total_kernel_run_time_in_profiling_us,
+            "total_kernel_run_time_in_profiling_us": total_kernel_cuda_time_in_profiling_us,
+            "total_kernel_cuda_time_in_profiling_us": total_kernel_cuda_time_in_profiling_us,
+            "total_kernel_run_time_in_profiling_us_cpu_cuda": total_kernel_run_time_in_profiling_us_cpu_cuda,
         }
 
     def calculate_reward_weighted(self, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -463,6 +473,7 @@ class KernelRewardClient:
         num_total_kernels = 0
         custom_kernel_cuda_time_in_profiling_us = 0
         total_kernel_run_time_in_profiling_us = 0
+        total_kernel_run_time_in_profiling_us_cpu_cuda = 0
         # if self.reward_config.coverage_reward.enable and correctness:
         final_reward = reward
         if correctness:
@@ -472,6 +483,9 @@ class KernelRewardClient:
             num_total_kernels = coverage_dict["num_total_kernels"]
             custom_kernel_cuda_time_in_profiling_us = coverage_dict["custom_kernel_cuda_time_in_profiling_us"]
             total_kernel_run_time_in_profiling_us = coverage_dict["total_kernel_run_time_in_profiling_us"]
+            total_kernel_run_time_in_profiling_us_cpu_cuda = coverage_dict[
+                "total_kernel_run_time_in_profiling_us_cpu_cuda"
+            ]
             print(f"[DEBUG] coverage: {coverage}")
             print(f"[DEBUG] num_custom_kernel: {num_custom_kernel}")
             print(f"[DEBUG] num_total_kernels: {num_total_kernels}")
@@ -492,6 +506,8 @@ class KernelRewardClient:
             "num_total_kernels": num_total_kernels,
             "custom_kernel_cuda_time_in_profiling_us": custom_kernel_cuda_time_in_profiling_us,
             "total_kernel_run_time_in_profiling_us": total_kernel_run_time_in_profiling_us,
+            "total_kernel_cuda_time_in_profiling_us": total_kernel_run_time_in_profiling_us,
+            "total_kernel_run_time_in_profiling_us_cpu_cuda": total_kernel_run_time_in_profiling_us_cpu_cuda,
         }
 
     def calculate_reward_speedup(self, result: Dict[str, Any]) -> Dict[str, Any]:
@@ -560,6 +576,7 @@ class KernelRewardClient:
         num_total_kernels = 0
         custom_kernel_cuda_time_in_profiling_us = 0
         total_kernel_run_time_in_profiling_us = 0
+        total_kernel_run_time_in_profiling_us_cpu_cuda = 0
 
         # if self.reward_config.coverage_reward.enable and correctness:
         final_reward = reward
@@ -570,6 +587,9 @@ class KernelRewardClient:
             num_total_kernels = coverage_dict["num_total_kernels"]
             custom_kernel_cuda_time_in_profiling_us = coverage_dict["custom_kernel_cuda_time_in_profiling_us"]
             total_kernel_run_time_in_profiling_us = coverage_dict["total_kernel_run_time_in_profiling_us"]
+            total_kernel_run_time_in_profiling_us_cpu_cuda = coverage_dict[
+                "total_kernel_run_time_in_profiling_us_cpu_cuda"
+            ]
 
             print(f"[DEBUG] coverage: {coverage}")
             print(f"[DEBUG] num_custom_kernel: {num_custom_kernel}")
@@ -592,6 +612,8 @@ class KernelRewardClient:
             "num_total_kernels": num_total_kernels,
             "custom_kernel_cuda_time_in_profiling_us": custom_kernel_cuda_time_in_profiling_us,
             "total_kernel_run_time_in_profiling_us": total_kernel_run_time_in_profiling_us,
+            "total_kernel_cuda_time_in_profiling_us": total_kernel_run_time_in_profiling_us,
+            "total_kernel_run_time_in_profiling_us_cpu_cuda": total_kernel_run_time_in_profiling_us_cpu_cuda,
         }
 
     def _merge_reward_result(self, raw_result: Dict[str, Any], reward_summary: Dict[str, Any]) -> Dict[str, Any]:

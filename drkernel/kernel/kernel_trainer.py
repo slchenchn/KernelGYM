@@ -3495,6 +3495,18 @@ class RayKernelTrainer(RayPPOTrainer):
                                 f"Filtered batch: {originl_len} -> {len(batch)} examples"
                             )
 
+                        if len(batch) == 0:
+                            skip_metrics = {
+                                "empty_batch/post_adv_filtered_examples": 0,
+                                "empty_batch/post_adv_filtered": 1.0,
+                            }
+                            logger.log(data=skip_metrics, step=self.global_steps)
+                            print(
+                                "[Empty Batch] All examples were masked after advantage computation; "
+                                "skipping actor/critic update for this step."
+                            )
+                            continue
+
                         # Pad by duplicating first N samples to make batch % max_world_size == 0
                         # Duplicated samples contribute same gradients (equivalent to increased sample weight)
                         batch, pad_size = pad_dataproto_to_divisor(

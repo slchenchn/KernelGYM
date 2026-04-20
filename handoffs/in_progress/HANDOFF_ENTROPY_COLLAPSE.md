@@ -1,8 +1,9 @@
 # Handoff: Entropy Collapse Root Cause & Fix
 
 **Date**: 2026-04-09  
-**Last updated**: 2026-04-10  
-**Status**: Direct masking failure confirmed; raw-policy entropy not yet measured; likely coverage-denominator bug identified; mitigation run running/resumed  
+**Last updated**: 2026-04-20
+**Status**: Direct masking failure confirmed; raw-policy entropy not yet measured; coverage-denominator bug fixed in current worktree; mitigation run previously running/resumed
+**Fix commit**: `df2722d` (`fix:time-coverage-cuda-only`)
 **Reference backend mitigation under test**: reward-side `torch_compile` → `pytorch` eager  
 
 ## Executive Summary
@@ -19,7 +20,7 @@ The drkernel-14b-coldstart TRLOO training run (2026-04-04 to 2026-04-08) achieve
 - geometric mismatch RS also rejects a large fraction of sequences; in logs this appears both as a sequence rejection fraction and as a token-weighted masked fraction
 - surviving updates become dominated by incorrect samples, and the logged post-mask entropy collapses
 
-**Current upstream hypothesis**: the leading cause is now a coverage-definition bug/mismatch: `time_coverage` divides matched custom-kernel CUDA time by a denominator that includes both CUDA time and CPU-side profiler time. Reward-side `reference_backend` may still affect the magnitude, but it is no longer the primary suspected mechanism.
+**Current upstream hypothesis**: the leading cause is now a coverage-definition bug/mismatch: `time_coverage` had been dividing matched custom-kernel CUDA time by a denominator that included both CUDA time and CPU-side profiler time. The current worktree now switches `time_coverage` to a CUDA-only denominator while preserving the CPU+CUDA total as a diagnostic field. Reward-side `reference_backend` may still affect the magnitude, but it is no longer the primary suspected mechanism.
 
 **Important distinction from official release**: at official release commit `3a84417f8c0efaadb215ef638b37d12e71ed20f3`, KernelGym reward-side `reference_backend` defaults to eager when omitted, while PPO training-side `actor_rollout_ref.ref.use_torch_compile` separately defaults to `true`. These are different layers and should not be conflated.
 

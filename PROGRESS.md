@@ -1,6 +1,161 @@
 # Progress
 
-#### H20 checkpoint eval on `.3` now tolerates split-disk checkpoint storage and stale hardcoded validation-data paths, and the head-only two-GPU eval was relaunched on `CUDA_VISIBLE_DEVICES=6,7` — ACTIVE
+#### The historical `20260409-092519` 14B run now has its remaining checkpoints `260 280 300` under dedicated eval on `.18` — ACTIVE
+
+##### Problem & Impact
+
+- The old `20260409-092519` run still had remaining checkpoints without completed eval results, but the previous on-disk signals had drifted:
+  - `eval_results/summary.txt` no longer matched the actual checkpoint tree
+  - `step_260` still had an incomplete eval directory without `metrics.json`
+- Without rechecking from the real checkpoint and `metrics.json` state, the remaining eval set could easily be misidentified.
+
+##### Resolution
+
+- Recomputed the remaining eval set from the actual filesystem state instead of trusting `summary.txt`:
+  - existing checkpoints under the old run: `20 60 100 140 180 220 260 280 300`
+  - completed evals by `metrics.json`: through `230` plus `270`
+  - actual remaining checkpoints: `260 280 300`
+- Revalidated the `.18` eval environment before launch:
+  - `which python`, `sys.executable`, and `VIRTUAL_ENV` all resolve to the shared repo venv
+  - reward health is reachable from `.18`
+  - the validation dataset, eval script, and all three target checkpoints are reachable
+- Removed stale partial eval directories for `260`, `280`, and `300`, then launched a dedicated `.18` tmux session with:
+  - `TRAIN_CLUSTER_PROFILE=a800`
+  - `TRAIN_HEAD_MODE=local`
+  - `EVAL_USE_WORKER=0`
+  - `EVAL_STEPS='260 280 300'`
+  - `EVAL_CLEANUP_KILL_GPU_PIDS=1`
+
+##### Result & Current State
+
+- The active `.18` eval session is `eval-14b-remaining-gpu-1618`.
+- The live log is [`/tmp/eval-14b-remaining-gpu-1618.log`](/tmp/eval-14b-remaining-gpu-1618.log).
+- The current batch is running serially on `.18` for the historical run:
+  - `260`: active in `kernel.main_grading` with `8` live `ray::AsyncActorRolloutRefWorker.execute_method` processes
+  - `280`: queued
+  - `300`: queued
+- `.18` currently has live eval processes and GPU occupancy for this batch.
+
+#### The fresh `14B` A800 eager run now uses a new log directory so the fixed `time_coverage` semantics do not share the old run history — ACTIVE
+
+##### Problem & Impact
+
+- The previous post-fix attempt still reused the old run directory, so it appeared under the historical log tree.
+- That was the wrong experiment boundary: once `time_coverage` semantics changed, the user wanted a fresh run with a new log directory instead of appending new steps to the old run history.
+
+##### Resolution
+
+- Re-scoped the experiment boundary so the same `14B` eager training configuration starts without `RUN_LOG_DIR`, allowing the canonical [`start_training.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_training.sh) path to create a fresh run directory.
+- Kept the requested runtime behavior changes that still apply to the new experiment:
+  - `VAL_BEFORE_TRAIN=False`
+  - `TEST_FREQ=0`
+  - `REWARD_TASK_TIMEOUT=30`
+- Verified from the fresh head-container log that the launcher created a new run directory under the standard timestamped naming scheme.
+
+##### Result & Current State
+
+- The active run directory is now:
+  - [`trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260419-131619`](</nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260419-131619>)
+- The head log explicitly shows the new path in `Logging training run to: .../run.20260419-131619/main.log`.
+- The current run starts from a fresh experiment boundary rather than restoring prior checkpoints:
+  - there is no `Found checkpoint`
+  - there is no `Resuming from`
+  - the training command now points `trainer.default_local_dir` at the new run's `checkpoints/`
+- The new run is live on `50/51`:
+  - tmux session: `train-14b-hfsdp8-pytorch-eager-fresh-5051`
+  - `ray status`: `2` active nodes, `16.0/16.0 GPU` in use
+  - both nodes have live `ray::WorkerDict.actor_rollout_init_model` workers on GPU
+  - the run has now made real training progress through `step 30`
+  - the current in-flight step is `31`
+  - the latest timing summary at `step 30` is:
+    - `gen`: `11.3 min`
+    - `old_log_prob`: `2.2 min`
+    - `update_actor`: `2.1 min`
+    - `total step`: `20.9 min`
+  - recent PRS / coverage signals are materially healthier than the archived failure regime:
+    - `coverage_rs_correct_only_masked_fraction`: `0.5202` at `step 30`
+    - `coverage_rs_mean_coverage`: `0.0735` at `step 30`
+
+#### `time_coverage` now uses a CUDA-only denominator instead of CUDA+CPU profiler time, and the diagnostic CPU+CUDA total is preserved separately — ACTIVE
+
+##### Problem & Impact
+
+- The entropy-collapse handoff identified a likely coverage-definition bug: `time_coverage` was being computed from `matched custom CUDA time / (all CUDA time + CPU profiler time)`.
+- That inflates the denominator with host-side profiler time, which can collapse coverage toward zero and cause PRS to reject nearly all correct samples even when the generated kernels account for meaningful CUDA execution time.
+
+##### Resolution
+
+- Patched the producer in [`kernelgym/toolkit/kernelbench/profiling.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/kernelgym/toolkit/kernelbench/profiling.py):
+  - `total_kernel_run_time_in_profiling_us` now means total CUDA time only
+  - added explicit diagnostic fields:
+    - `total_kernel_cuda_time_in_profiling_us`
+    - `total_kernel_run_time_in_profiling_us_cpu_cuda`
+- Patched downstream consumers to use the CUDA-only denominator consistently:
+  - [`kernelgym/toolkit/kernelbench/pipeline.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/kernelgym/toolkit/kernelbench/pipeline.py)
+  - [`drkernel/kernel/rewards/reward_client.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/rewards/reward_client.py)
+  - [`drkernel/kernel/workers/reward_manager/kernel_async.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/workers/reward_manager/kernel_async.py)
+- Added the new diagnostic fields to the reward log routing and result-metadata sanitation paths:
+  - [`drkernel/kernel/scripts/rl/log_router.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/log_router.py)
+  - [`kernelgym/schema/result.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/kernelgym/schema/result.py)
+- Validated the fix with:
+  - `python -m py_compile` on all edited Python files
+  - a synthetic coverage check showing:
+    - CUDA-only total = `40`
+    - CPU+CUDA total = `200`
+    - fixed `time_coverage` = `10 / 40 = 0.25`
+    - old diluted ratio would have been `10 / 200 = 0.05`
+  - a `KernelRewardClient.compute_coverage_reward(...)` sanity check confirming the client now returns `coverage=0.25` from the CUDA-only denominator
+
+##### Result & Current State
+
+- The repository now computes `time_coverage` from CUDA-only runtime, which matches the intended semantics in the entropy-collapse diagnosis.
+- The old CPU+CUDA denominator is still retained under a separate field for debugging and comparison.
+- The reward environment has since been refreshed, so the new producer-side and reward-worker code is now live end-to-end rather than only validated synthetically.
+- The current `50/51` fresh run is using the fixed `time_coverage` path.
+
+#### Checkpoint eval on `.18` recovered `global_step_230`, and the next auto-discovered batch `240 250 260 270` is now running — SUPERSEDED
+
+##### Problem & Impact
+
+- `global_step_230` still had no valid eval result under [`eval_results/step_230`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/eval_results/step_230):
+  - the first attempt failed at eval startup because stale `.18` GPU workers left too little free memory for vLLM
+  - the later rerun failed again before producing `metrics.json`, and the same batch also hit `Disk quota exceeded` while trying to continue into later checkpoints
+- That left `step_230` without a usable metric artifact and blocked the next untested checkpoint batch behind it.
+
+##### Resolution
+
+- Revalidated the actual `.18` eval environment before running the new batch:
+  - `which python`, `sys.executable`, and `VIRTUAL_ENV` all resolve to the shared repo venv
+  - reward health is reachable from `.18`
+  - `/nfs/FM` now has free space again
+  - `.18` GPUs were idle before the new batch
+- Removed the stale partial [`eval_results/step_230`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/eval_results/step_230) directory and ran a dedicated single-step eval in tmux session `eval-14b-230-gpu-1618` using the canonical [`merge_and_eval_checkpoints.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/merge_and_eval_checkpoints.sh) path with:
+  - `TRAIN_CLUSTER_PROFILE=a800`
+  - `CKPT_BASE=<...>/checkpoints`
+  - `EVAL_STEPS=230`
+  - `EVAL_USE_WORKER=0`
+  - `EVAL_CLEANUP_KILL_GPU_PIDS=1`
+- Confirmed the rerun crossed the previous failure boundary and completed:
+  - GPU merge completed and rewrote `huggingface_merged`
+  - the job advanced into `python -m kernel.main_grading`
+  - [`eval_results/step_230/metrics.json`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/eval_results/step_230/metrics.json) was written successfully
+  - the summary row for `230` is now present in [`eval_results/summary.txt`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/eval_results/summary.txt)
+- With `230` closed, continued into the next auto-discovered checkpoint batch in tmux session `eval-14b-auto-gpu-1618` with the same canonical script and `.18`-local dedicated-eval settings.
+- The new batch auto-detected the remaining untested checkpoints:
+  - `240 250 260 270`
+
+##### Result & Current State
+
+- `global_step_230` now has a completed eval result:
+  - `pass@1=0.8033`
+  - `correct=0.6787`
+  - `compile=0.8938`
+  - `fast@1=0.5250`
+  - `fast@1.2=0.3275`
+- `global_step_270` also completed in the same `.18` checkpoint-eval thread.
+- The later `.18` `step_260` eval was interrupted when reward was restarted for the new `time_coverage` rollout, so `.18` is no longer the active workstream right now.
+
+#### H20 checkpoint eval on `.3` now tolerates split-disk checkpoint storage and stale hardcoded validation-data paths while staying isolated to `CUDA_VISIBLE_DEVICES=6,7` — ACTIVE
 
 ##### Problem & Impact
 
@@ -19,7 +174,7 @@
   - remaps them to the current worktree's `${DRKERNEL_ROOT}/data/...` when the corresponding file exists locally
 - Revalidated the current local validation dataset path:
   - `/data3/csl/projects/kernel_agents/KernelGYM-vllm018/drkernel/data/drkernel-validation-data/validation_data_thinking.parquet`
-- Relaunched checkpoint eval under tmux session `eval-8b-ckpt-gpu67` with:
+- Ran checkpoint eval under tmux session `eval-8b-ckpt-gpu67` with:
   - `CUDA_VISIBLE_DEVICES=6,7`
   - `MERGE_CUDA_VISIBLE_DEVICES=6`
   - `EVAL_USE_WORKER=0`
@@ -30,7 +185,7 @@
 ##### Result & Current State
 
 - The new eval session is active on `.3` and is again processing the untested checkpoints `10 50 100 140`.
-- Training remains isolated on GPUs `0-5`; the eval relaunch is constrained to the remaining two GPUs.
+- Training remains isolated on GPUs `0-5`; the eval is constrained to the remaining two GPUs.
 - The current live phase has progressed past both earlier failure boundaries:
   - `Step 10` split-storage shard staging completed
   - `Step 10` HF merge completed and wrote `huggingface_merged`
@@ -75,7 +230,32 @@
 - Worker-side eval results no longer disappear from the head-side summary path on split storage.
 - Validation completed with `bash -n` plus live helper smoke tests on the `h20` profile.
 
-#### The `14B` A800 eager run is active on `50/51` with IB, validation disabled, and checkpoint eval isolated to `.18` — ACTIVE
+#### Post-adv empty-batch at `step 221` no longer crashes the `14B` A800 trainer after the empty-batch guard was added — ACTIVE
+
+##### Problem & Impact
+
+- The live `14B` A800 eager run on `50/51` crashed immediately after rollout completed for `step 221`.
+- The failing case was not a reward outage or node loss: post-advantage filtering removed all examples from the batch, but training still continued into `update_actor`, which then crashed during `DataProto` chunking with `RuntimeError: split_size must be a positive integer, but got 0`.
+- This blocked forward progress at `global_step_220` even though reward and rollout infrastructure were otherwise healthy.
+
+##### Resolution
+
+- Confirmed the failure from the run logs:
+  - [`trainer.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/trainer.log) shows the post-adv filtering collapse to zero examples.
+  - [`main.log`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519/main.log) shows the resulting `split_size` runtime error.
+- Patched [`kernel_trainer.py`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/kernel_trainer.py) so that if post-adv filtering leaves an empty batch, the trainer logs the condition and skips actor/critic update for that step instead of entering `update_actor` with zero rows.
+- Syntax-validated the patch and confirmed the guarded code path could continue training instead of entering `update_actor` with zero rows.
+
+##### Result & Current State
+
+- The crash root cause is fixed in the current worktree and recorded in commit `9da31c2`.
+- The empty-batch guard has now survived later low-survivor steps in live training:
+  - `step 269` completed after `Filtered batch: 768 -> 15 examples`
+  - `step 270` completed after `Filtered batch: 768 -> 14 examples`
+- The latest visible completed training step is now `270`, and the run is currently in-flight on `step 271`.
+- This confirms the trainer no longer crashes when post-adv filtering produces a tiny surviving batch; the patched run is making real forward progress.
+
+#### The `14B` A800 training topology is standardized on `50/51` with IB, validation disabled, and checkpoint eval isolated to `.18` — ACTIVE
 
 ##### Problem & Impact
 
@@ -83,18 +263,17 @@
 - A stable operating split was needed:
   - `192.168.16.50/51` for live training
   - `192.168.16.18` for checkpoint evaluation
-  - validation disabled during resume so training throughput is not penalized
+  - validation disabled so training throughput is not penalized
 
 ##### Resolution
 
-- Standardized the current training topology on [`a800_docker_50_51.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_profiles/a800_docker_50_51.sh) and resumed through the canonical launcher [`start_training.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/start_training.sh).
-- Revalidated the actual launch environment inside both training containers before relaunch:
+- Standardized the current training topology on [`a800_docker_50_51.sh`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/kernel/scripts/rl/infra_profiles/a800_docker_50_51.sh).
+- Revalidated the actual launch environment inside both training containers:
   - `which python`
   - `sys.executable`
   - `VIRTUAL_ENV`
   - `ray` import
-- Reused the existing run directory [`trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/drkernel/logs/trloo-14b-hfsdp8-pytorch-eager.train.16xA800.reward.16x4090.run.20260409-092519) instead of creating a fresh run.
-- Kept validation disabled at resume time:
+- Kept validation disabled in the training configuration:
   - `VAL_BEFORE_TRAIN=False`
   - `TEST_FREQ=0`
 - Verified that the live training processes are not only configured for IB but are actually using it:
@@ -104,9 +283,7 @@
 
 ##### Result & Current State
 
-- The live `14B` run is currently training on `50/51` under tmux session `train-14b-hfsdp8-pytorch-eager-resume-5051`.
-- `ray status` on the training cluster shows both nodes active with all `16` training GPUs in use.
-- The checkpoint tracker for the active run currently points at `global_step_160`.
+- The `50/51` training slice uses live IB workers and no longer shares checkpoint-eval work with the training nodes.
 - `.18` is now reserved for checkpoint eval rather than live training.
 
 #### Reward long-tail diagnosis was consolidated into one root-cause thread, and the immediate A800 incident was recovered — COMPLETED
@@ -123,7 +300,7 @@
 - Narrowed the A800 incident root cause to two layers:
   - incident root cause: `16.40` host-level NVIDIA/UVM/Xid failure caused reward worker collapse
   - structural amplification: synchronous `/evaluate` holds the client-side request/token until HTTP returns, so reward-side stalls become `20-50+` minute rollout tails
-- Recovered the A800 reward environment operationally by rebooting `16.39/16.40`, cleaning broken Docker state, remounting `/nfs/FM` on `16.40`, restarting reward, and then resuming training.
+- Recovered the A800 reward environment operationally by rebooting `16.39/16.40`, cleaning broken Docker state, remounting `/nfs/FM` on `16.40`, restarting reward, and restoring the training path afterward.
 - Wrote the final incident report to [`HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md`](/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/handoffs/in_progress/HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md).
 
 ##### Result & Current State
@@ -202,7 +379,14 @@
 
 - The active checkpoint-eval flow now assumes GPU merge only.
 - The current helper can be pointed at a checkpoint root and will discover missing tests automatically when explicit steps are not provided.
-- `.18` is currently running the missing `170/180/190/200` eval batch for the active 14B run, and that batch was launched without `EVAL_STEPS`, so the step list came from automatic untested-checkpoint discovery rather than a hand-maintained list.
+- `.18` completed the newly discovered missing `210/220` eval batch for the active 14B run.
+- The first `step_230` attempt did not finish eval successfully: GPU merge completed, but vLLM worker startup failed on `.18` because stale `ray::AsyncActorRolloutRefWorker` processes from earlier eval sessions were still holding roughly `18-40 GiB` per GPU, leaving less free memory than the eval launcher's `gpu_memory_utilization=0.5` requirement.
+- `.18` was then cleaned with `ray stop --force`, the stale eval workers were removed, partial `step_230` outputs were deleted, and the eval batch was relaunched.
+- The rerun exposed a new blocker: `step_230` eval did not complete, and `240/250/260` merge attempts also failed because the shared `/nfs/FM` mount hit `Disk quota exceeded` during writeout of merged HF artifacts and summary updates.
+- As a result:
+  - `210/220` remain the latest completed eval checkpoints
+  - `230/240/250/260` currently have no valid `metrics.json`
+  - the active `.18` blocker is now storage quota, not stale GPU/Ray state
 
 #### Working docs and handoffs were reorganized around active investigations instead of accumulating patch notes — COMPLETED
 

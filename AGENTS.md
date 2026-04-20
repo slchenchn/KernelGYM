@@ -77,4 +77,6 @@ The repository's top-level harness files are the stable operational documents th
 10. Keep related restarts, checks, and monitor updates under the same milestone entry when they belong to the same root-cause thread.
 11. Prefer fewer higher-signal `PROGRESS.md` entries over many tiny incremental ones when no decision boundary changed.
 12. Omit routine restarts, repeated health checks, and step-by-step operator actions unless they changed the diagnosis, configuration, or decision boundary.
-13. Detailed live training-status checking procedures belong in a repo-local skill, not in `AGENTS.md`.
+13. Do not record routine stop, resume, or relaunch actions in `PROGRESS.md` as milestones by themselves.
+14. If a stop, resume, or relaunch matters, record only the resulting diagnosis change, configuration change, or experiment-boundary change, not the operator action itself.
+15. Detailed live training-status checking procedures belong in a repo-local skill, not in `AGENTS.md`.

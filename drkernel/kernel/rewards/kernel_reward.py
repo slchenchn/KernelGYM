@@ -22,6 +22,7 @@ import logging
 import re
 from typing import Dict, Any
 from kernel.rewards.reward_client import KernelRewardClient
+from kernel.utils.kernel_code import extract_kernel_submission
 
 
 # 全局客户端实例与其配置，复用连接且在配置变更时重建
@@ -60,7 +61,7 @@ def extract_reference_code(solution_str: str) -> str:
     return solution_str
 
 
-def extract_kernel_code(solution_str: str) -> str:
+def extract_kernel_code(solution_str: str, kernel_backend: str = "triton") -> str:
     """
     从解决方案字符串中提取内核代码
     
@@ -70,26 +71,7 @@ def extract_kernel_code(solution_str: str) -> str:
     Returns:
         提取的内核代码
     """
-    # 查找内核实现标记
-    patterns = [
-        r"# Kernel Implementation\s*\n(.*?)(?=# End|$)",
-        r"```python\s*# Kernel\s*\n(.*?)```",
-        r"# Your implementation:\s*\n(.*?)(?=# End|$)",
-        r"# Generated kernel:\s*\n(.*?)(?=# End|$)",
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, solution_str, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-    
-    # 如果没有找到特定标记，尝试提取最后一个代码块
-    code_blocks = re.findall(r"```(?:\w+)?\s*\n?(.*?)```", solution_str, re.DOTALL)
-    if code_blocks:
-        return code_blocks[-1].strip()
-    
-    # 回退：假设整个响应就是内核代码
-    return solution_str
+    return extract_kernel_submission(solution_str, kernel_backend=kernel_backend)
 
 def compute_kernel_reward_batch(solution_strs: list, ground_truths: list, entry_points: str, **kwargs) -> list:
     """
@@ -131,13 +113,14 @@ def compute_kernel_reward_batch(solution_strs: list, ground_truths: list, entry_
         verbose_errors = getattr(reward_config, "verbose_errors")
         detect_decoy_kernel = getattr(reward_config, "detect_decoy_kernel")
         reference_backend = getattr(reward_config, "reference_backend", "torch_compile")
+        kernel_backend = getattr(reward_config, "kernel_backend", "triton")
         ref_cache_cfg = getattr(reward_config, "reference_cache", None)
         use_ref_cache = bool(getattr(ref_cache_cfg, "enable", False)) if ref_cache_cfg else False
 
         for i, solution_str in enumerate(solution_strs):
             # reference_code = extract_reference_code(solution_str)
             reference_code = ground_truths[i]
-            kernel_code = extract_kernel_code(solution_str)
+            kernel_code = extract_kernel_code(solution_str, kernel_backend=kernel_backend)
             entry_point = entry_points[i]
 
             if uuids is not None:
@@ -148,6 +131,7 @@ def compute_kernel_reward_batch(solution_strs: list, ground_truths: list, entry_
             tasks.append({
                 "reference_code": reference_code,
                 "kernel_code": kernel_code,
+                "kernel_backend": kernel_backend,
                 "entry_point": entry_point,
                 "use_reference_cache": use_ref_cache,
                 "uuid": uuid if uuids is not None else "",

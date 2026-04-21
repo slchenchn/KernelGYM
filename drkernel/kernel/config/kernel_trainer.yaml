@@ -13,12 +13,15 @@ data:
 # Kernel specific reward model configuration
 reward_model:
   reward_manager: kernel
-  server_url: "http://[fdbd:dccd:cdd2:2001::19d]:10458"
+  server_url: "http://192.168.16.39:8111"
   reward_func_name: "calculate_reward_weighted"
   reference_backend: "torch_compile"
+  kernel_backend: "triton"
   init_correct_weight: 0.5
   init_performance_weight: 0.5
   speedup_eps: 0.01
+  apply_compilation_fail_penalty: true
+  apply_precheck_fail_penalty: true
   launch_reward_fn_async: true
   enhanced: true
   use_sandbox_rate_limit: false   # 启用组合版 Hybrid
@@ -31,6 +34,7 @@ reward_model:
   reward_policy:
     penalties:
       penalty_score: 0.0
+      precheck_fail: -0.5        # precheck 失败惩罚
       compilation_fail: -0.5     # 编译失败惩罚
       correctness_fail: -0.3     # 正确性失败惩罚
       perf_degrade: -0.1         # speedup < 1.0 的惩罚
@@ -71,6 +75,8 @@ reward_model:
     max_retries: ${reward_model.max_retries}
     reward_weights: ${reward_model.reward_weights}
     reward_policy: ${reward_model.reward_policy}
+    apply_compilation_fail_penalty: ${reward_model.apply_compilation_fail_penalty}
+    apply_precheck_fail_penalty: ${reward_model.apply_precheck_fail_penalty}
     is_valid: false
     task_timeout: ${reward_model.task_timeout}
     num_perf_trials: ${reward_model.num_perf_trials}

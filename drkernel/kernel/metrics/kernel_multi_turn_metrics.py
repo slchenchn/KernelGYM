@@ -197,8 +197,8 @@ def compute_kernel_multi_turn_metrics(batch: DataProto, prefix: str = "kernel") 
             # Correctness
             correctness = info.get('correctness', False)
             # Handle decoy_kernel if present
-            if 'decoy_kernel' in info:
-                correctness = correctness and not info['decoy_kernel']
+            decoy_kernel = info.get('decoy_kernel', info.get('is_decoy_kernel', False))
+            correctness = correctness and not decoy_kernel
             turn_correctness.append(1.0 if correctness else 0.0)
 
             # Performance (only for correct samples)
@@ -298,8 +298,8 @@ def compute_kernel_multi_turn_metrics(batch: DataProto, prefix: str = "kernel") 
 
                 # Check correctness
                 correctness = info.get('correctness', False)
-                if 'decoy_kernel' in info:
-                    correctness = correctness and not info['decoy_kernel']
+                decoy_kernel = info.get('decoy_kernel', info.get('is_decoy_kernel', False))
+                correctness = correctness and not decoy_kernel
 
                 # Update best
                 if correctness:
@@ -358,8 +358,8 @@ def compute_kernel_multi_turn_metrics(batch: DataProto, prefix: str = "kernel") 
         info = turns_dict[final_turn]
 
         correctness = info.get('correctness', False)
-        if 'decoy_kernel' in info:
-            correctness = correctness and not info['decoy_kernel']
+        decoy_kernel = info.get('decoy_kernel', info.get('is_decoy_kernel', False))
+        correctness = correctness and not decoy_kernel
         final_correctness.append(1.0 if correctness else 0.0)
 
         if correctness:
@@ -388,12 +388,12 @@ def compute_kernel_multi_turn_metrics(batch: DataProto, prefix: str = "kernel") 
         last_info = turns_dict[last_turn]
 
         first_correct = first_info.get('correctness', False)
-        if 'decoy_kernel' in first_info:
-            first_correct = first_correct and not first_info['decoy_kernel']
+        first_decoy = first_info.get('decoy_kernel', first_info.get('is_decoy_kernel', False))
+        first_correct = first_correct and not first_decoy
 
         last_correct = last_info.get('correctness', False)
-        if 'decoy_kernel' in last_info:
-            last_correct = last_correct and not last_info['decoy_kernel']
+        last_decoy = last_info.get('decoy_kernel', last_info.get('is_decoy_kernel', False))
+        last_correct = last_correct and not last_decoy
 
         if first_correct:
             first_correct_count += 1

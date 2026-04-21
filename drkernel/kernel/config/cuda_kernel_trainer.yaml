@@ -1,0 +1,12 @@
+defaults:
+  - kernel_trainer
+  - _self_
+
+reward_model:
+  kernel_backend: "cuda_agent"
+  task_timeout: 30
+
+actor_rollout_ref:
+  rollout:
+    multi_turn:
+      prompt_config_path: kernel/config/prompt_config/multi_turn_cuda_kernel.yaml

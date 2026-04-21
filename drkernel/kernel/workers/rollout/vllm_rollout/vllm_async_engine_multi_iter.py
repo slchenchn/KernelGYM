@@ -49,6 +49,7 @@ from kernel.event_logging import (
     format_turn_env_summary,
     format_env_result_summary,
     format_turn_model_summary,
+    truncate_feedback_for_prompt,
 )
 from kernel.workers.agent import BaseAgent
 from kernel.workers.rollout.vllm_rollout.vllm_async_engine import (
@@ -187,6 +188,8 @@ class MultiIterAsyncvLLMEngine:
         # Store configuration for agent and environment
         self.max_agent_turns = config.rollout.multi_turn.max_user_turns
         self.mask_void_turn = config.rollout.multi_turn.mask_void_turn
+        self.max_tool_response_length = config.rollout.multi_turn.get("max_tool_response_length", 0)
+        self.tool_response_truncate_side = config.rollout.multi_turn.get("tool_response_truncate_side", "middle")
         # self.mask_void_turn = False    # in kernel grading, we do not have exact definition of void turn
 
         # Agent and environment configuration
@@ -1056,7 +1059,11 @@ class MultiIterAsyncvLLMEngine:
             tool_response_json = json.dumps(env_state, ensure_ascii=False, indent=2)
         except Exception:
             tool_response_json = str(env_state)
-        tool_response = tool_response_json
+        tool_response = truncate_feedback_for_prompt(
+            tool_response_json,
+            self.max_tool_response_length,
+            self.tool_response_truncate_side,
+        )
 
         make_up_tool_response = True    # makeup tool response secondly
         

@@ -93,6 +93,37 @@ def _truncate_text(text: Any, limit: int = 400) -> Any:
     return text[:limit] + "...<truncated>"
 
 
+def truncate_feedback_for_prompt(
+    text: Any,
+    max_chars: int | None,
+    truncate_side: str = "middle",
+) -> str:
+    """Bound tool feedback before it is injected into the next rollout prompt."""
+    if not isinstance(text, str):
+        text = str(text)
+    try:
+        limit = int(max_chars or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit <= 0 or len(text) <= limit:
+        return text
+
+    marker = f"\n...[truncated, total_chars={len(text)}]...\n"
+    keep_chars = limit - len(marker)
+    if keep_chars <= 0:
+        return text[:limit]
+
+    side = str(truncate_side or "middle").lower()
+    if side in {"left", "start", "head"}:
+        return marker + text[-keep_chars:]
+    if side in {"right", "end", "tail"}:
+        return text[:keep_chars] + marker
+
+    head_chars = keep_chars // 2
+    tail_chars = keep_chars - head_chars
+    return text[:head_chars] + marker + text[-tail_chars:]
+
+
 CODE_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<code>.*?)```", re.DOTALL)
 
 

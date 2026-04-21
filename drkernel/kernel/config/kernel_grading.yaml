@@ -280,12 +280,13 @@ reward_model:
   reward_manager: kernel_async
 
   # KernelServer URL
-  server_url: "http://[fdbd:dccd:cdd2:2001::22f]:9744"
+  server_url: "http://192.168.16.39:8111"
 
   # Reward function
   reward_func_name: "calculate_reward_weighted"
 
   reference_backend: null
+  kernel_backend: "triton"
 
   # Async configuration
   launch_reward_fn_async: true
@@ -303,6 +304,8 @@ reward_model:
   init_correct_weight: 0.5
   init_performance_weight: 0.5
   speedup_eps: 0.01
+  apply_compilation_fail_penalty: true
+  apply_precheck_fail_penalty: true
   speedup_reward_upper_bound: 3.0
   speedup_reward_lower_bound: 0.0
   coverage_reward:
@@ -329,6 +332,7 @@ reward_model:
   reward_policy:
     penalties:
       penalty_score: 0.0
+      precheck_fail: -0.5
       compilation_fail: -0.5
       correctness_fail: -0.3
       perf_degrade: -0.1

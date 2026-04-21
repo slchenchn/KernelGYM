@@ -239,6 +239,12 @@ class KernelRewardClient:
         self.init_performance_weight = float(reward_config.init_performance_weight)
         self.speedup_eps = float(reward_config.speedup_eps)
         self.penalty_score = float(reward_config.reward_policy.penalties.penalty_score)
+        self.apply_compilation_fail_penalty = bool(
+            getattr(reward_config, "apply_compilation_fail_penalty", False)
+        )
+        self.apply_precheck_fail_penalty = bool(
+            getattr(reward_config, "apply_precheck_fail_penalty", False)
+        )
         self.speedup_reward_upper_bound = float(reward_config.speedup_reward_upper_bound)
         self.speedup_reward_lower_bound = float(reward_config.speedup_reward_lower_bound)
 
@@ -283,15 +289,44 @@ class KernelRewardClient:
             logger.debug(f"preflight skipped due to error: {e}")
             return True, ""
 
+    def _normalize_failed_error(self, result: Dict[str, Any]) -> str:
+        error_message = result.get("error_message", "Task failed")
+        if error_message == "Task failed":
+            error_message = result.get("error", "Task failed")
+
+        error_message_text = str(error_message)
+        lower_error_message_text = error_message_text.lower()
+        is_precheck_failed = "precheck failed:" in lower_error_message_text and \
+            "CUDA-Agent precheck error".lower() not in lower_error_message_text
+        if is_precheck_failed:
+            return "Task failed: code pre-check error"
+        if "Kernel compilation failed" in error_message_text:
+            return "Task failed due to kernel compilation error"
+        return error_message_text
+
+    def _get_compilation_fail_penalty(self) -> float:
+        penalties = self.reward_config.reward_policy.penalties
+        return float(penalties.get("compilation_fail", -0.5))
+
+    def _get_precheck_fail_penalty(self) -> float:
+        penalties = self.reward_config.reward_policy.penalties
+        return float(penalties.get("precheck_fail", penalties.get("compilation_fail", -0.5)))
+
+    def _resolve_failure_reward(self, error_message: str) -> float:
+        lower_error_message = str(error_message).lower()
+        if self.apply_precheck_fail_penalty and "pre-check error" in lower_error_message:
+            return self._get_precheck_fail_penalty()
+        if self.apply_compilation_fail_penalty and "kernel compilation error" in lower_error_message:
+            return self._get_compilation_fail_penalty()
+        return self.penalty_score
+
     def calculate_reward_like_kernel(self, result: Dict[str, Any]) -> Dict[str, Any]:
         if result.get("status") != "completed":
-            error_message = result.get("error_message", "Task failed")
-            if error_message == "Task failed":
-                error_message = result.get("error", "Task failed")
-            print(f"[HybridClient] calculate_reward_like_kernel error_message: {error_message}")
+            error_message = self._normalize_failed_error(result)
+            print(f"[HybridClient] calculate_reward_like_kernel error_message: {error_message[:500]}")
             print(f"[HybridClient] Task failed result: {result}")
             return {
-                "reward": -1.0,
+                "reward": self._resolve_failure_reward(error_message),
                 "speedup": 0.0,
                 "success": False,
                 "correctness": False,
@@ -319,12 +354,12 @@ class KernelRewardClient:
         compiled = result.get("compiled", False)
 
         penalties = self.reward_config.reward_policy.penalties
-        compilation_fail_penalty = float(penalties.get("compilation_fail", -0.5))
+        compilation_fail_penalty = self._get_compilation_fail_penalty()
         correctness_fail_penalty = float(penalties.get("correctness_fail", -0.3))
         perf_degrade_penalty = float(penalties.get("perf_degrade", -0.1))
 
         if not compiled:
-            reward = compilation_fail_penalty
+            reward = compilation_fail_penalty if self.apply_compilation_fail_penalty else self.penalty_score
         elif not correctness:
             reward = correctness_fail_penalty
         else:
@@ -419,14 +454,12 @@ class KernelRewardClient:
         penalty_score = self.penalty_score
 
         if result.get("status") != "completed":
-            error_message = result.get("error_message", "Task failed")
-            if error_message == "Task failed":
-                error_message = result.get("error", "Task failed")
-            print(f"[HybridClient] calculate_reward_like_kernel error_message: {error_message}")
+            error_message = self._normalize_failed_error(result)
+            print(f"[HybridClient] calculate_reward_like_kernel error_message: {error_message[:500]}")
             print(f"[HybridClient] Task failed result: {result}")
 
             return_result = {
-                "reward": penalty_score,
+                "reward": self._resolve_failure_reward(error_message),
                 "speedup": 0.0,
                 "success": False,
                 "correctness": False,
@@ -459,6 +492,7 @@ class KernelRewardClient:
         correctness = result.get("correctness", False)
         speedup = result.get("speedup", 0.0)
         compiled = result.get("compiled", False)
+        compilation_fail_penalty = self._get_compilation_fail_penalty()
         # In fact, profiling is always None here since it is actually inside metadata
         profiling = result.get("profiling", None) 
 
@@ -467,7 +501,10 @@ class KernelRewardClient:
 
         is_speedup_positive = speedup >= (1 + self.speedup_eps) # ignore too small speedup
 
-        reward = self.init_correct_weight * correctness + self.init_performance_weight * is_speedup_positive
+        if not compiled and self.apply_compilation_fail_penalty:
+            reward = compilation_fail_penalty
+        else:
+            reward = self.init_correct_weight * correctness + self.init_performance_weight * is_speedup_positive
 
         num_custom_kernel = 0
         num_total_kernels = 0
@@ -514,15 +551,12 @@ class KernelRewardClient:
         penalty_score = self.penalty_score
 
         if result.get("status") != "completed":
-            
-            error_message = result.get("error_message", "Task failed")
-            if error_message == "Task failed":
-                error_message = result.get("error", "Task failed")
-            print(f"[HybridClient] calculate_reward_like_kernel error_message: {error_message}")
+            error_message = self._normalize_failed_error(result)
+            print(f"[HybridClient] calculate_reward_like_kernel error_message: {error_message[:500]}")
             print(f"[HybridClient] Task failed result: {result}")
 
             return_result = {
-                "reward": penalty_score,
+                "reward": self._resolve_failure_reward(error_message),
                 "speedup": 0.0,
                 "success": False,
                 "correctness": False,
@@ -555,6 +589,7 @@ class KernelRewardClient:
         correctness = result.get("correctness", False)
         speedup = result.get("speedup", 0.0)
         compiled = result.get("compiled", False)
+        compilation_fail_penalty = self._get_compilation_fail_penalty()
         # In fact, profiling is always None here since it is actually inside metadata
         profiling = result.get("profiling", None)
 
@@ -570,7 +605,10 @@ class KernelRewardClient:
         if reward_speedup < self.speedup_reward_lower_bound:
             reward_speedup = 0.0
 
-        reward = self.init_correct_weight * correctness + self.init_performance_weight * reward_speedup
+        if not compiled and self.apply_compilation_fail_penalty:
+            reward = compilation_fail_penalty
+        else:
+            reward = self.init_correct_weight * correctness + self.init_performance_weight * reward_speedup
 
         num_custom_kernel = 0
         num_total_kernels = 0
@@ -658,6 +696,7 @@ class KernelRewardClient:
         for idx, task in enumerate(tasks):
             kcode = task.get("kernel_code", "")
             ep = task.get("entry_point", "Model")
+            kernel_backend = task.get("kernel_backend", "triton")
             ok, missing = self._preflight_validate(task.get("reference_code", ""), kcode, ep)
             if not ok:
                 try:
@@ -710,7 +749,7 @@ class KernelRewardClient:
                 "task_id": task.get("task_id") or self._next_task_id("parallel_task"),
                 "reference_code": task.get("reference_code", ""),
                 "kernel_code": kcode,
-                "backend": "triton",
+                "backend": kernel_backend,
                 "num_correct_trials": task.get("num_correct_trials", 5),
                 "num_perf_trials": task.get("num_perf_trials", 100),
                 "num_warmup": task.get("num_warmup", 3),

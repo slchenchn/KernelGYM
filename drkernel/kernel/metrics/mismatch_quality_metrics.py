@@ -169,8 +169,8 @@ def _extract_quality_data(reward_info_list: list, mask: np.ndarray) -> dict[str,
         # Extract correctness
         correctness = info.get('correctness', False)
         # Handle decoy_kernel if present
-        if 'decoy_kernel' in info:
-            correctness = correctness and not info['decoy_kernel']
+        decoy_kernel = info.get('decoy_kernel', info.get('is_decoy_kernel', False))
+        correctness = correctness and not decoy_kernel
 
         data['correctness'].append(correctness)
 

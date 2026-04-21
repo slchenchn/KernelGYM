@@ -2654,8 +2654,12 @@ class RayKernelTrainer(RayPPOTrainer):
                 time_coverage_list.append(info.get("time_coverage", 0.0))
                 num_coverage_list.append(info.get("num_coverage", 0.0))
                 # Consider both correctness and decoy_kernel for filtering
+                decoy_kernel = info.get(
+                    "decoy_kernel",
+                    info.get("is_decoy_kernel", False),
+                )
                 is_correct = info.get("correctness", False) and not info.get(
-                    "decoy_kernel", False
+                    "decoy_kernel", decoy_kernel
                 )
                 correctness_list.append(is_correct)
                 performance_list.append(info.get("performance", 0.0))

@@ -300,6 +300,7 @@ class AsyncKernelRewardManager:
         reward_extra_info["performance"] = speedup
         reward_extra_info["is_speedup_positive"] = is_speedup_positive
         reward_extra_info["is_decoy_kernel"] = is_decoy_kernel
+        reward_extra_info["decoy_kernel"] = is_decoy_kernel
         reward_extra_info["compilation"] = compiled
         reward_extra_info["success"] = success
         reward_extra_info["status"] = status

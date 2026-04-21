@@ -6,6 +6,7 @@ from typing import Any, Dict
 
 from kernelgym.backend.base import Backend
 
+from .cuda_agent_backend import KernelBenchCudaAgentBackend
 from .cuda_backend import KernelBenchCudaBackend
 from .triton_backend import KernelBenchTritonBackend
 
@@ -16,6 +17,7 @@ class KernelBenchBackend(Backend):
     def __init__(self) -> None:
         self._triton = KernelBenchTritonBackend()
         self._cuda = KernelBenchCudaBackend()
+        self._cuda_agent = KernelBenchCudaAgentBackend()
 
     @staticmethod
     def _resolve_backend_name(name: Any | None) -> str:
@@ -24,12 +26,16 @@ class KernelBenchBackend(Backend):
             return "triton"
         if key in ("cuda", "tilelang", "torch", "torch_compile", "torch-compile"):
             return "cuda"
+        if key == "cuda_agent":
+            return "cuda_agent"
         return "cuda"
 
     def _select(self, name: Any | None) -> Backend:
         backend = self._resolve_backend_name(name)
         if backend == "triton":
             return self._triton
+        if backend == "cuda_agent":
+            return self._cuda_agent
         return self._cuda
 
     def compile(self, code: str, **kwargs: Any) -> Dict[str, Any]:

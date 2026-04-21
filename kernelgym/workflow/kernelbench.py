@@ -138,19 +138,24 @@ class KernelBenchWorkflowController(WorkflowController):
             if cached_runtime is not None:
                 ref_result = self._cached_reference_result(eval_task, cached_runtime)
             else:
-                    ref_task = ReferenceTimingTask(
-                        task_id=f"{eval_task.task_id}_ref",
-                        base_task_id=eval_task.task_id,
-                        reference_code=eval_task.reference_code,
-                        backend=eval_task.backend,
-                        num_perf_trials=eval_task.num_perf_trials,
-                        timeout=eval_task.timeout,
-                        device=eval_task.device,
-                        priority=eval_task.priority,
-                        entry_point=eval_task.entry_point,
-                        reference_backend=eval_task.reference_backend,
-                        device_preference=eval_task.device_preference,
-                    )
+                ref_task = ReferenceTimingTask(
+                    task_id=f"{eval_task.task_id}_ref",
+                    base_task_id=eval_task.task_id,
+                    reference_code=eval_task.reference_code,
+                    toolkit=eval_task.toolkit,
+                    backend_adapter=eval_task.backend_adapter,
+                    backend=eval_task.backend,
+                    num_perf_trials=eval_task.num_perf_trials,
+                    num_warmup=eval_task.num_warmup,
+                    perf_trim_count=eval_task.perf_trim_count,
+                    timeout=eval_task.timeout,
+                    device=eval_task.device,
+                    priority=eval_task.priority,
+                    entry_point=eval_task.entry_point,
+                    reference_backend=eval_task.reference_backend,
+                    device_preference=eval_task.device_preference,
+                    resources=eval_task.resources,
+                )
 
         if ref_result is None and ref_task is not None:
             ref_payload = ref_task.to_dict()

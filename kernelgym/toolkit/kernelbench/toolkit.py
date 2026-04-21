@@ -31,7 +31,7 @@ class KernelBenchToolkit(Toolkit):
     def __init__(self) -> None:
         pass
 
-    def _resolve_eval_flags(self, task: Any) -> tuple[bool, bool, bool]:
+    def _resolve_eval_flags(self, task: Any) -> tuple[bool, bool, bool, bool]:
         run_correctness = task.run_correctness
         if run_correctness is None:
             run_correctness = True
@@ -48,7 +48,11 @@ class KernelBenchToolkit(Toolkit):
         if run_performance is None:
             run_performance = True
 
-        return run_correctness, run_triton_detection, run_performance
+        detect_decoy_kernel = task.detect_decoy_kernel
+        if detect_decoy_kernel is None:
+            detect_decoy_kernel = True
+
+        return run_correctness, run_triton_detection, run_performance, detect_decoy_kernel
 
     def evaluate(self, task: Dict[str, Any], backend=None, **kwargs: Any) -> Dict[str, Any]:
         task_type = task.get("task_type", "evaluation")
@@ -110,7 +114,12 @@ class KernelBenchToolkit(Toolkit):
         try:
             set_seed(42)
 
-            run_correctness, enable_triton_detection, measure_performance = self._resolve_eval_flags(task)
+            (
+                run_correctness,
+                enable_triton_detection,
+                measure_performance,
+                detect_decoy_kernel,
+            ) = self._resolve_eval_flags(task)
             num_correct_trials = task.num_correct_trials if run_correctness else 0
 
             enable_profiling = task.enable_profiling
@@ -134,6 +143,7 @@ class KernelBenchToolkit(Toolkit):
                 entry_point=task.entry_point,
                 enable_profiling=bool(enable_profiling),
                 enable_triton_detection=enable_triton_detection,
+                detect_decoy_kernel=detect_decoy_kernel,
                 backend_adapter=backend_adapter,
             )
 
@@ -300,7 +310,12 @@ class KernelBenchToolkit(Toolkit):
         try:
             set_seed(42)
 
-            run_correctness, enable_triton_detection, measure_performance = self._resolve_eval_flags(task)
+            (
+                run_correctness,
+                enable_triton_detection,
+                measure_performance,
+                detect_decoy_kernel,
+            ) = self._resolve_eval_flags(task)
             num_correct_trials = task.num_correct_trials if run_correctness else 0
             num_warmup = getattr(task, "num_warmup", 3)
             perf_trim_count = getattr(task, "perf_trim_count", 0)
@@ -319,6 +334,7 @@ class KernelBenchToolkit(Toolkit):
                 entry_point=task.entry_point,
                 enable_profiling=enable_profiling,
                 enable_triton_detection=enable_triton_detection,
+                detect_decoy_kernel=detect_decoy_kernel,
                 backend_adapter=backend_adapter,
             )
 

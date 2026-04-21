@@ -18,7 +18,10 @@ from kernelgym.toolkit.kernelbench.loading import (
     load_original_model_and_inputs,
 )
 from kernelgym.toolkit.kernelbench.correctness import run_and_check_correctness
-from kernelgym.toolkit.kernelbench.profiling import compute_triton_kernel_coverage
+from kernelgym.toolkit.kernelbench.profiling import (
+    compute_named_kernel_coverage,
+    compute_triton_kernel_coverage,
+)
 from kernelgym.toolkit.kernelbench.timing import (
     get_timing_stats,
     run_profiling_only,
@@ -30,6 +33,120 @@ def _record_phase_timing(metadata: Dict[str, Any], key: str, start_time: float) 
     elapsed = perf_counter() - start_time
     metadata[key] = elapsed
     return elapsed
+
+
+def _apply_coverage_metadata(
+    *,
+    metadata: Dict[str, Any],
+    kernel_exec_result: KernelExecResult,
+    coverage_result_dict: Dict[str, Any],
+    coverage_backend: str,
+    detect_decoy_kernel: bool,
+) -> None:
+    num_custom_kernels = coverage_result_dict["num_custom_kernels"]
+    num_total_kernels = coverage_result_dict["num_total_kernels"]
+    custom_kernels_not_in_profiling = coverage_result_dict.get(
+        "custom_kernels_not_in_profiling", []
+    )
+    custom_kernels_in_profiling = coverage_result_dict.get(
+        "custom_kernels_in_profiling", []
+    )
+    total_kernel_run_time_in_profiling_us = coverage_result_dict[
+        "total_kernel_run_time_in_profiling_us"
+    ]
+    total_kernel_cuda_time_in_profiling_us = coverage_result_dict.get(
+        "total_kernel_cuda_time_in_profiling_us",
+        total_kernel_run_time_in_profiling_us,
+    )
+    total_kernel_run_time_in_profiling_us_cpu_cuda = coverage_result_dict.get(
+        "total_kernel_run_time_in_profiling_us_cpu_cuda",
+        total_kernel_run_time_in_profiling_us,
+    )
+    custom_kernel_cuda_time_in_profiling_us = coverage_result_dict[
+        "custom_kernel_cuda_time_in_profiling_us"
+    ]
+
+    metadata["coverage_backend"] = coverage_backend
+    metadata["num_custom_kernels"] = num_custom_kernels
+    metadata["num_total_kernels"] = num_total_kernels
+    ratio = num_custom_kernels / num_total_kernels if num_total_kernels > 0 else 0
+    coverage_text = (
+        f"Run {num_custom_kernels} custom kernels / Total {num_total_kernels} kernels, "
+        f"Coverage: {ratio:.2%}"
+    )
+    metadata["custom_kernel_coverage"] = coverage_text
+    metadata["custom_kernel_not_in_profiling"] = custom_kernels_not_in_profiling
+    metadata["custom_kernel_in_profiling"] = custom_kernels_in_profiling
+    metadata["total_kernel_run_time_in_profiling_us"] = (
+        total_kernel_run_time_in_profiling_us
+    )
+    metadata["total_kernel_cuda_time_in_profiling_us"] = (
+        total_kernel_cuda_time_in_profiling_us
+    )
+    metadata["total_kernel_run_time_in_profiling_us_cpu_cuda"] = (
+        total_kernel_run_time_in_profiling_us_cpu_cuda
+    )
+    metadata["custom_kernel_cuda_time_in_profiling_us"] = (
+        custom_kernel_cuda_time_in_profiling_us
+    )
+    ratio_time = (
+        custom_kernel_cuda_time_in_profiling_us / total_kernel_run_time_in_profiling_us
+        if total_kernel_run_time_in_profiling_us > 0
+        else 0
+    )
+    metadata["custom_kernel_cuda_time_coverage"] = (
+        f"Custom kernel CUDA time: {custom_kernel_cuda_time_in_profiling_us:.2f}us / "
+        f"Total CUDA time: {total_kernel_run_time_in_profiling_us:.2f}us, "
+        f"Coverage: {ratio_time:.2%}"
+    )
+    if coverage_backend == "triton":
+        metadata["triton_kernel_coverage"] = coverage_text
+        metadata["triton_kernel_not_in_profiling"] = custom_kernels_not_in_profiling
+        metadata["triton_kernel_in_profiling"] = custom_kernels_in_profiling
+
+    if kernel_exec_result and isinstance(kernel_exec_result.metadata, dict):
+        kernel_exec_result.metadata["coverage_backend"] = coverage_backend
+        kernel_exec_result.metadata["num_custom_kernels"] = num_custom_kernels
+        kernel_exec_result.metadata["num_total_kernels"] = num_total_kernels
+        kernel_exec_result.metadata["custom_kernel_coverage"] = coverage_text
+        kernel_exec_result.metadata["custom_kernel_not_in_profiling"] = (
+            custom_kernels_not_in_profiling
+        )
+        kernel_exec_result.metadata["custom_kernel_in_profiling"] = (
+            custom_kernels_in_profiling
+        )
+        kernel_exec_result.metadata["custom_kernel_cuda_time_in_profiling_us"] = (
+            custom_kernel_cuda_time_in_profiling_us
+        )
+        kernel_exec_result.metadata["total_kernel_run_time_in_profiling_us"] = (
+            total_kernel_run_time_in_profiling_us
+        )
+        kernel_exec_result.metadata["total_kernel_cuda_time_in_profiling_us"] = (
+            total_kernel_cuda_time_in_profiling_us
+        )
+        kernel_exec_result.metadata["total_kernel_run_time_in_profiling_us_cpu_cuda"] = (
+            total_kernel_run_time_in_profiling_us_cpu_cuda
+        )
+        kernel_exec_result.metadata["custom_kernel_cuda_time_coverage"] = (
+            metadata["custom_kernel_cuda_time_coverage"]
+        )
+        if coverage_backend == "triton":
+            kernel_exec_result.metadata["triton_kernel_coverage"] = coverage_text
+
+    if not detect_decoy_kernel:
+        return
+
+    if num_custom_kernels == 0 and num_total_kernels > 0:
+        print(
+            f"[WARNING] Profiler captured {num_total_kernels} kernels but 0 custom kernels "
+            f"for backend={coverage_backend} - marking as decoy"
+        )
+        kernel_exec_result.decoy_kernel = True
+    elif num_custom_kernels == 0 and num_total_kernels == 0:
+        print(
+            "[WARNING] Profiler captured 0 total kernels - likely profiler bug, "
+            "NOT marking as decoy"
+        )
 
 
 def _run_correctness_step(
@@ -73,6 +190,7 @@ def _run_triton_detection_step(
     device: Union[torch.device, int],
     verbose: bool,
     backend: str,
+    detect_decoy_kernel: bool,
 ):
     if not enable_triton_detection:
         return False
@@ -101,7 +219,7 @@ def _run_triton_detection_step(
             metadata["triton_profiler_matches"] = matches
             print(f"Triton usage detection result: {used}")
             print(f"Triton usage detection matches: {matches}")
-            if not used and is_triton:
+            if not used and is_triton and detect_decoy_kernel:
                 print(
                     "[Eval] Backend is 'triton' but no Triton usage detected, marking as decoy"
                 )
@@ -132,6 +250,10 @@ def _run_performance_step(
     seed_num: int,
     device: Union[torch.device, int],
     enable_profiling: bool,
+    enable_triton_detection: bool,
+    detect_decoy_kernel: bool,
+    backend: str,
+    backend_profiling_hints: Optional[Dict[str, Any]],
 ):
     def _profiling_empty(metrics: Dict[str, Any]) -> bool:
         if not metrics:
@@ -238,136 +360,79 @@ def _run_performance_step(
                 print(
                     f"[DEBUG Profiling] kernel_count: {profiling_metrics.get('kernel_count', 'N/A')}"
                 )
-                print(
-                    f"[DEBUG Profiling] triton_profiler_matches: {metadata.get('triton_profiler_matches', [])}"
-                )
-
-                try:
-                    coverage_result_dict = compute_triton_kernel_coverage(
-                        metadata["triton_profiler_matches"], profiling_metrics
-                    )
-                except Exception as coverage_error:
+                if enable_triton_detection:
+                    triton_profiler_matches = metadata.get("triton_profiler_matches", [])
                     print(
-                        f"[ERROR] compute_triton_kernel_coverage failed: {coverage_error}"
+                        f"[DEBUG Profiling] triton_profiler_matches: {triton_profiler_matches}"
                     )
-                    import traceback
+                    try:
+                        coverage_result_dict = compute_triton_kernel_coverage(
+                            triton_profiler_matches,
+                            profiling_metrics,
+                        )
+                    except Exception as coverage_error:
+                        print(
+                            f"[ERROR] compute_triton_kernel_coverage failed: {coverage_error}"
+                        )
+                        import traceback
 
-                    traceback.print_exc()
-                    coverage_result_dict = {
-                        "num_custom_kernels": 0,
-                        "num_total_kernels": 0,
-                        "triton_kernels_not_in_profiling": metadata.get(
-                            "triton_profiler_matches", []
-                        ),
-                        "triton_kernels_in_profiling": [],
-                        "total_kernel_run_time_in_profiling_us": 0,
-                        "total_kernel_cuda_time_in_profiling_us": 0,
-                        "total_kernel_run_time_in_profiling_us_cpu_cuda": 0,
-                        "custom_kernel_cuda_time_in_profiling_us": 0,
-                    }
-                print(
-                    f"[DEBUG Coverage] num_custom_kernels: {coverage_result_dict['num_custom_kernels']}"
-                )
-                print(
-                    f"[DEBUG Coverage] num_total_kernels: {coverage_result_dict['num_total_kernels']}"
-                )
-                num_custom_kernels = coverage_result_dict["num_custom_kernels"]
-                num_total_kernels = coverage_result_dict["num_total_kernels"]
-                triton_kernels_not_in_profiling = coverage_result_dict[
-                    "triton_kernels_not_in_profiling"
-                ]
-                triton_kernels_in_profiling = coverage_result_dict[
-                    "triton_kernels_in_profiling"
-                ]
-                total_kernel_run_time_in_profiling_us = coverage_result_dict[
-                    "total_kernel_run_time_in_profiling_us"
-                ]
-                total_kernel_cuda_time_in_profiling_us = coverage_result_dict.get(
-                    "total_kernel_cuda_time_in_profiling_us",
-                    total_kernel_run_time_in_profiling_us,
-                )
-                total_kernel_run_time_in_profiling_us_cpu_cuda = coverage_result_dict.get(
-                    "total_kernel_run_time_in_profiling_us_cpu_cuda",
-                    total_kernel_run_time_in_profiling_us,
-                )
-                custom_kernel_cuda_time_in_profiling_us = coverage_result_dict[
-                    "custom_kernel_cuda_time_in_profiling_us"
-                ]
-
-                metadata["num_custom_kernels"] = num_custom_kernels
-                metadata["num_total_kernels"] = num_total_kernels
-                ratio = num_custom_kernels / num_total_kernels if num_total_kernels > 0 else 0
-                metadata[
-                    "triton_kernel_coverage"
-                ] = f"Run {num_custom_kernels} custom kernels / Total {num_total_kernels} kernels, Coverage: {ratio:.2%}"
-                metadata["triton_kernel_not_in_profiling"] = (
-                    triton_kernels_not_in_profiling
-                )
-                metadata["triton_kernel_in_profiling"] = triton_kernels_in_profiling
-
-                metadata[
-                    "total_kernel_run_time_in_profiling_us"
-                ] = total_kernel_run_time_in_profiling_us
-                metadata[
-                    "total_kernel_cuda_time_in_profiling_us"
-                ] = total_kernel_cuda_time_in_profiling_us
-                metadata[
-                    "total_kernel_run_time_in_profiling_us_cpu_cuda"
-                ] = total_kernel_run_time_in_profiling_us_cpu_cuda
-                metadata[
-                    "custom_kernel_cuda_time_in_profiling_us"
-                ] = custom_kernel_cuda_time_in_profiling_us
-                ratio_time = (
-                    custom_kernel_cuda_time_in_profiling_us
-                    / total_kernel_run_time_in_profiling_us
-                    if total_kernel_run_time_in_profiling_us > 0
-                    else 0
-                )
-                metadata[
-                    "custom_kernel_cuda_time_coverage"
-                ] = (
-                    f"Custom kernel CUDA time: {custom_kernel_cuda_time_in_profiling_us:.2f}us / Total CUDA time: {total_kernel_run_time_in_profiling_us:.2f}us, Coverage: {ratio_time:.2%}"
-                )
-
-                if kernel_exec_result and isinstance(kernel_exec_result.metadata, dict):
-                    kernel_exec_result.metadata["num_custom_kernels"] = num_custom_kernels
-                    kernel_exec_result.metadata["num_total_kernels"] = num_total_kernels
-                    kernel_exec_result.metadata[
-                        "triton_kernel_coverage"
-                    ] = f"Run {num_custom_kernels} custom kernels / Total {num_total_kernels} kernels, Coverage: {ratio:.2%}"
-                    kernel_exec_result.metadata["triton_profiler_matches"] = metadata[
-                        "triton_profiler_matches"
-                    ]
-
-                    kernel_exec_result.metadata[
-                        "custom_kernel_cuda_time_in_profiling_us"
-                    ] = custom_kernel_cuda_time_in_profiling_us
-                    kernel_exec_result.metadata[
-                        "total_kernel_run_time_in_profiling_us"
-                    ] = total_kernel_run_time_in_profiling_us
-                    kernel_exec_result.metadata[
-                        "total_kernel_cuda_time_in_profiling_us"
-                    ] = total_kernel_cuda_time_in_profiling_us
-                    kernel_exec_result.metadata[
-                        "total_kernel_run_time_in_profiling_us_cpu_cuda"
-                    ] = total_kernel_run_time_in_profiling_us_cpu_cuda
-                    kernel_exec_result.metadata[
-                        "custom_kernel_cuda_time_coverage"
-                    ] = (
-                        f"Custom kernel CUDA time: {custom_kernel_cuda_time_in_profiling_us:.2f}us / Total CUDA time: {total_kernel_run_time_in_profiling_us:.2f}us, Coverage: {ratio_time:.2%}"
+                        traceback.print_exc()
+                        coverage_result_dict = {
+                            "num_custom_kernels": 0,
+                            "num_total_kernels": 0,
+                            "custom_kernels_not_in_profiling": triton_profiler_matches,
+                            "custom_kernels_in_profiling": [],
+                            "total_kernel_run_time_in_profiling_us": 0,
+                            "total_kernel_cuda_time_in_profiling_us": 0,
+                            "total_kernel_run_time_in_profiling_us_cpu_cuda": 0,
+                            "custom_kernel_cuda_time_in_profiling_us": 0,
+                        }
+                    _apply_coverage_metadata(
+                        metadata=metadata,
+                        kernel_exec_result=kernel_exec_result,
+                        coverage_result_dict=coverage_result_dict,
+                        coverage_backend="triton",
+                        detect_decoy_kernel=detect_decoy_kernel,
                     )
-
-                if num_custom_kernels == 0 and num_total_kernels > 0:
+                elif backend == "cuda_agent":
+                    custom_kernel_names = []
+                    if backend_profiling_hints:
+                        custom_kernel_names = list(
+                            backend_profiling_hints.get("custom_kernel_names", [])
+                        )
+                    metadata["custom_kernel_names"] = custom_kernel_names
                     print(
-                        f"[WARNING] Profiler captured {num_total_kernels} kernels but 0 custom kernels - marking as decoy"
+                        f"[DEBUG Profiling] cuda custom_kernel_names: {custom_kernel_names}"
                     )
-                    kernel_exec_result.decoy_kernel = True
-                elif num_custom_kernels == 0 and num_total_kernels == 0:
-                    print(
-                        "[WARNING] Profiler captured 0 total kernels - likely profiler bug, NOT marking as decoy"
-                    )
-                    print(
-                        f"[INFO] Relying on Triton hook detection instead (detected: {metadata.get('triton_profiler_used', False)})"
+                    if custom_kernel_names:
+                        coverage_result_dict = compute_named_kernel_coverage(
+                            custom_kernel_names,
+                            profiling_metrics,
+                        )
+                    else:
+                        coverage_result_dict = {
+                            "num_custom_kernels": 0,
+                            "num_total_kernels": profiling_metrics.get("kernel_count", 0),
+                            "custom_kernels_not_in_profiling": [],
+                            "custom_kernels_in_profiling": [],
+                            "total_kernel_run_time_in_profiling_us": profiling_metrics.get(
+                                "total_cuda_time_us", 0.0
+                            ),
+                            "total_kernel_cuda_time_in_profiling_us": profiling_metrics.get(
+                                "total_cuda_time_us", 0.0
+                            ),
+                            "total_kernel_run_time_in_profiling_us_cpu_cuda": profiling_metrics.get(
+                                "total_cpu_time_us", 0.0
+                            )
+                            + profiling_metrics.get("total_cuda_time_us", 0.0),
+                            "custom_kernel_cuda_time_in_profiling_us": 0.0,
+                        }
+                    _apply_coverage_metadata(
+                        metadata=metadata,
+                        kernel_exec_result=kernel_exec_result,
+                        coverage_result_dict=coverage_result_dict,
+                        coverage_backend="cuda_agent",
+                        detect_decoy_kernel=detect_decoy_kernel and bool(custom_kernel_names),
                     )
             if verbose:
                 print(f"[Eval] Performance Stats: {runtime_stats}")
@@ -396,6 +461,7 @@ def eval_kernel_against_ref(
     entry_point: str = "Model",
     enable_profiling: bool = True,
     enable_triton_detection: bool = True,
+    detect_decoy_kernel: bool = True,
     backend_adapter: Optional[Any] = None,
 ) -> KernelExecResult:
     assert torch.cuda.is_available(), "CUDA is not available, cannot run Eval"
@@ -471,6 +537,7 @@ def eval_kernel_against_ref(
     tempfile_handle = None
     backend_handle = None
     backend_session = None
+    backend_profiling_hints: Optional[Dict[str, Any]] = None
 
     def _cleanup():
         if backend_session is not None:
@@ -512,6 +579,8 @@ def eval_kernel_against_ref(
                 build_dir=build_dir,
             )
             backend_session = backend_adapter.open_session(backend_handle, device=device)
+            if isinstance(backend_handle, dict):
+                backend_profiling_hints = backend_handle.get("profiling_hints")
             tempfile_handle = backend_handle.get("tempfile_handle")
         else:
             if is_triton:
@@ -599,6 +668,7 @@ def eval_kernel_against_ref(
         device=device,
         verbose=verbose,
         backend=backend,
+        detect_decoy_kernel=detect_decoy_kernel,
     )
     _record_phase_timing(metadata, "kg_kernel_triton_detect_s", triton_detect_start)
     if decoy_detected:
@@ -619,6 +689,10 @@ def eval_kernel_against_ref(
             seed_num=seed_num,
             device=device,
             enable_profiling=enable_profiling,
+            enable_triton_detection=enable_triton_detection,
+            detect_decoy_kernel=detect_decoy_kernel,
+            backend=backend,
+            backend_profiling_hints=backend_profiling_hints,
         )
 
     metadata["kg_kernel_total_s"] = perf_counter() - overall_start

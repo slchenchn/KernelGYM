@@ -18,6 +18,7 @@ class Backend(str, Enum):
 
     CUDA = "cuda"
     TRITON = "triton"
+    CUDA_AGENT = "cuda_agent"
 
 
 class Priority(str, Enum):

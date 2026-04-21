@@ -14,22 +14,20 @@ from kernelgym.config import settings
 logger = logging.getLogger("kernelgym.toolkit.kernelbench.profiling")
 
 
-def compute_triton_kernel_coverage(matched_triton_kernels: List[str], profilling_result: Dict[str, Any]):
-    """Compute the coverage of the matched triton kernels in the profiling result."""
+def _matches_profiler_name(captured: str, profiler_name: str) -> bool:
+    cap = captured.lower()
+    prof = profiler_name.lower()
+    if cap == prof:
+        return True
+    if cap in prof or prof in cap:
+        return True
+    return False
 
-    def _matches_profiler_name(captured: str, profiler_name: str) -> bool:
-        cap = captured.lower()
-        prof = profiler_name.lower()
-        if cap == prof:
-            return True
-        if cap in prof or prof in cap:
-            return True
-        return False
 
-    kernels = matched_triton_kernels
+def _compute_named_kernel_coverage(
+    kernel_names: List[str], profilling_result: Dict[str, Any]
+) -> Dict[str, Any]:
     num_custom_kernels = 0
-    kernel_names = [kernel.split(" ")[0] for kernel in kernels]
-
     kernels_in_profiling = profilling_result["kernels"]
 
     # `time_coverage` is intended to measure matched custom-kernel CUDA time as a
@@ -67,9 +65,25 @@ def compute_triton_kernel_coverage(matched_triton_kernels: List[str], profilling
         "total_kernel_cuda_time_in_profiling_us": total_cuda_time,
         "total_kernel_run_time_in_profiling_us_cpu_cuda": total_cpu_cuda_time,
         "custom_kernel_cuda_time_in_profiling_us": matched_cuda_time,
-        "triton_kernels_not_in_profiling": triton_kernels_not_in_profiling,
-        "triton_kernels_in_profiling": triton_kernels_in_profiling,
+        "custom_kernels_not_in_profiling": triton_kernels_not_in_profiling,
+        "custom_kernels_in_profiling": triton_kernels_in_profiling,
     }
+
+
+def compute_triton_kernel_coverage(matched_triton_kernels: List[str], profilling_result: Dict[str, Any]):
+    """Compute the coverage of the matched triton kernels in the profiling result."""
+
+    kernel_names = [kernel.split(" ")[0] for kernel in matched_triton_kernels]
+    result = _compute_named_kernel_coverage(kernel_names, profilling_result)
+    result["triton_kernels_not_in_profiling"] = result["custom_kernels_not_in_profiling"]
+    result["triton_kernels_in_profiling"] = result["custom_kernels_in_profiling"]
+    return result
+
+
+def compute_named_kernel_coverage(kernel_names: List[str], profilling_result: Dict[str, Any]):
+    """Compute profiler coverage for a list of expected custom CUDA kernel names."""
+
+    return _compute_named_kernel_coverage(kernel_names, profilling_result)
 
 
 @contextmanager
@@ -94,6 +108,24 @@ def profiling_context(enabled: bool = True):
             yield None
             return
 
+        cuda_available = torch.cuda.is_available()
+        cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        device_info = "cuda:unavailable"
+        if cuda_available:
+            try:
+                current_device = torch.cuda.current_device()
+                device_name = torch.cuda.get_device_name(current_device)
+                device_info = f"cuda:{current_device} ({device_name})"
+            except Exception as e:
+                device_info = f"cuda:unknown (error={e})"
+            try:
+                test = torch.ones((1024,), device="cuda")
+                _ = test.sum()
+                torch.cuda.synchronize()
+                print("[Profiler] Preflight CUDA op executed")
+            except Exception as e:
+                print(f"[Profiler] Preflight failed: {e}")
+
         prof = profiler.profile(
             activities=activities,
             record_shapes=settings.profiling_record_shapes,
@@ -105,16 +137,6 @@ def profiling_context(enabled: bool = True):
         prof.__enter__()
         try:
             print("[Profiler] Profiler started successfully")
-            cuda_available = torch.cuda.is_available()
-            cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-            device_info = "cuda:unavailable"
-            if cuda_available:
-                try:
-                    current_device = torch.cuda.current_device()
-                    device_name = torch.cuda.get_device_name(current_device)
-                    device_info = f"cuda:{current_device} ({device_name})"
-                except Exception as e:
-                    device_info = f"cuda:unknown (error={e})"
             print(
                 "[Profiler] Context pid=%s cuda_available=%s device=%s CUDA_VISIBLE_DEVICES=%s",
                 os.getpid(),
@@ -122,14 +144,6 @@ def profiling_context(enabled: bool = True):
                 device_info,
                 cuda_visible,
             )
-            if cuda_available:
-                try:
-                    test = torch.ones((1024,), device="cuda")
-                    _ = test.sum()
-                    torch.cuda.synchronize()
-                    print("[Profiler] Self-test CUDA op executed")
-                except Exception as e:
-                    print(f"[Profiler] Self-test failed: {e}")
             yield prof
         finally:
             try:

@@ -47,6 +47,10 @@ class EvaluationRequest(BaseModel):
         default=None,
         description="Enable Triton kernel usage detection (decoy check)",
     )
+    detect_decoy_kernel: Optional[bool] = Field(
+        default=None,
+        description="Enable backend-specific decoy-kernel detection",
+    )
     measure_performance: Optional[bool] = Field(
         default=None,
         description="Measure kernel performance timing (default True for kernelbench)",

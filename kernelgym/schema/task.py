@@ -30,6 +30,7 @@ class EvaluationTask:
     is_valid: bool = False
     enable_profiling: Optional[bool] = None
     enable_triton_detection: Optional[bool] = None
+    detect_decoy_kernel: Optional[bool] = None
     measure_performance: Optional[bool] = None
     run_correctness: Optional[bool] = None
     run_triton_detection: Optional[bool] = None
@@ -95,6 +96,7 @@ class KernelEvaluationTask:
     device_preference: Optional[str] = None
     enable_profiling: Optional[bool] = None
     enable_triton_detection: Optional[bool] = None
+    detect_decoy_kernel: Optional[bool] = None
     measure_performance: Optional[bool] = None
     run_correctness: Optional[bool] = None
     run_triton_detection: Optional[bool] = None

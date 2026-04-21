@@ -6,6 +6,7 @@ logs/
 .infra_profile.local.sh
 SPEC.md
 outputs/
+tmp/
 wandb/
 checkpoints/
 kernelgym/*probe*/

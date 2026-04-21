@@ -53,6 +53,7 @@ from kernel.event_logging import (
     truncate_feedback_for_prompt,
 )
 from kernel.workers.agent import BaseAgent, KernelAgent
+from kernel.workers.rollout.prompt_templates import apply_turn_prompt_template
 from kernel.workers.rollout.vllm_rollout.online_quant_utils import (
     maybe_apply_online_quantization_engine_kwargs,
 )
@@ -1688,22 +1689,12 @@ class MultiTurnAsyncvLLMEngine:
                         messages = req.messages
                 else:
                     raise ValueError(f"Invalid history mode: {history_mode}")
-                if prompt_template is not None:
-                    if not tool_as_user:
-                        if current_turn == 0 and messages[-1]["role"] == "user":
-                            messages[-1]["content"] = f'{messages[-1]["content"]}\n\n{prompt_template}'
-                        else:
-                            messages.append({"role": "user", "content": prompt_template})
-                    else:
-                        print("tool_as_user is True")
-                        if current_turn > 0:
-                            assert messages[-1]["role"] == "user", "The last message should be a user turn"
-                            feedback = messages[-1]["content"]
-                            #TODO: weiliu: please check the prompt template format and write in config yaml file
-                            env_feedback_with_prompt = prompt_template.format(feedback=feedback)
-                            print(f"env_feedback_with_prompt: {env_feedback_with_prompt}")
-                            # messages.append({"role": "user", "content": env_feedback_with_prompt})
-                            messages[-1]["content"] = env_feedback_with_prompt
+                apply_turn_prompt_template(
+                    messages,
+                    prompt_template,
+                    current_turn=current_turn,
+                    tool_as_user=tool_as_user,
+                )
         
         prompt_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
 

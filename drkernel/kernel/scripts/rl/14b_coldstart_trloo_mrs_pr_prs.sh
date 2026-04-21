@@ -10,8 +10,9 @@ REWARD_LOG_HW="${REWARD_LOG_HW:-16x4090}"
 init_launcher_run_state
 enable_launcher_log_router
 
-TRAIN_DATASET=("/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM/drkernel/data/drkernel-rl-data/cuda_llm_rl_thinking_1025.parquet")
-VALID_DATASET=("/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM/drkernel/data/drkernel-validation-data/validation_data_thinking.parquet")
+HYDRA_CONFIG_NAME="${HYDRA_CONFIG_NAME:-cuda_kernel_trainer}"
+TRAIN_DATASET=("${DRKERNEL_ROOT}/data/drkernel-rl-data-neutral/cuda_llm_rl_thinking_1025.parquet")
+VALID_DATASET=("${DRKERNEL_ROOT}/data/drkernel-validation-data-neutral/validation_data_thinking.parquet")
 KERNELGYM_SERVER_URL="${KERNELGYM_SERVER_URL:-""}"
 MODEL_NAME="${MODEL_NAME:-hkust-nlp/drkernel-14b-coldstart}"
 MODEL_PATH="${MODEL_PATH:-${MODEL_NAME}}"
@@ -39,7 +40,7 @@ COVERAGE_REWARD_TYPE="time_coverage"
 COVERAGE_REWARD_WEIGHT=0.5
 COVERAGE_REWARD_ENABLE=True
 
-REWARD_TASK_TIMEOUT="${REWARD_TASK_TIMEOUT:-300}"
+REWARD_TASK_TIMEOUT="${REWARD_TASK_TIMEOUT:-30}"
 REWARD_TIMEOUT="${REWARD_TIMEOUT:-1800}"
 REWARD_ACQUIRE_TIMEOUT="${REWARD_ACQUIRE_TIMEOUT:-2400}"
 REWARD_MAX_CONCURRENT="${REWARD_MAX_CONCURRENT:-32}"

@@ -236,6 +236,7 @@ PROMPT_OVERSAMPLING_FACTOR=${PROMPT_OVERSAMPLING_FACTOR:-2.0}  # 2.0 recommended
 SAMPLE_OVERSAMPLING_FACTOR=${SAMPLE_OVERSAMPLING_FACTOR:-1.5}  # 1.5 recommended with two-gate
 MAX_SKIP_STEPS=${MAX_SKIP_STEPS:-10}
 FIX_QWEN3_CHAT_TEMPLATE=${FIX_QWEN3_CHAT_TEMPLATE:-False}
+HYDRA_CONFIG_NAME=${HYDRA_CONFIG_NAME:-kernel_trainer}
 
 # Sample selection and group management
 SAMPLE_SELECTION_STRATEGY=${SAMPLE_SELECTION_STRATEGY:-efficiency_stochastic}  # Better exploration
@@ -717,6 +718,7 @@ PY
   echo "Gradient Clip: $GRAD_CLIP"
   echo "Val Only: $VAL_ONLY"
   echo "Fix Qwen3 Chat Template: $FIX_QWEN3_CHAT_TEMPLATE"
+  echo "Hydra Config Name: $HYDRA_CONFIG_NAME"
 
   # set ppo micro token
   PPO_MICRO_TOKEN=$(generate_model_micro_token "$MODEL_NAME")
@@ -776,7 +778,7 @@ run_training() {
     rollout_vllm_extra_args+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.allow_deprecated_quantization=$ROLLOUT_VLLM_ALLOW_DEPRECATED_QUANTIZATION")
   fi
 
-  PYTHONUNBUFFERED=1 python -m kernel.main_kernel \
+  PYTHONUNBUFFERED=1 python -m kernel.main_kernel --config-name "$HYDRA_CONFIG_NAME" \
       trainer.val_before_train=$VAL_BEFORE_TRAIN \
       algorithm.adv_estimator=$ALGORITHM \
       algorithm.is_get_last_turn=$IS_GET_LAST_TURN \

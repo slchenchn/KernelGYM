@@ -6,7 +6,7 @@ INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${INFRA_DIR}/../../../.." && pwd)"
 
 SUDO_PW="csl"
-REWARD_REPO_PATH="${REWARD_REPO_PATH:-/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018}"
+REWARD_REPO_PATH="${REWARD_REPO_PATH:-${REPO_ROOT}}"
 
 # Reward nodes
 REWARD_API_HOST="192.168.16.39"

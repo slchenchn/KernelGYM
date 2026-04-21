@@ -2,6 +2,8 @@
 
 ## Runbooks And Handoffs
 
+- [`handoffs/in_progress/HANDOFF_TRITON_TO_CUDA_RL.md`](handoffs/in_progress/HANDOFF_TRITON_TO_CUDA_RL.md)
+  Current CUDA-Agent migration handoff covering Triton-to-CUDA reward/rollout changes, full-set sweep results, compile-path caveats, timeout/reference-cache defaults, max-model-len interpretation, and Qwen3.5 chat-template notes.
 - [`handoffs/in_progress/HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md`](handoffs/in_progress/HANDOFF_REWARD_SYNC_HTTP_LONGTAIL.md)
   Root-cause handoff for the reward `/evaluate` long-tail stall where client-side synchronous waits hold tokens and stretch rollout steps into `50-60+ min`.
 - [`handoffs/in_progress/HANDOFF_REWARD_ENV_ROBUSTNESS.md`](handoffs/in_progress/HANDOFF_REWARD_ENV_ROBUSTNESS.md)
@@ -67,11 +69,31 @@
 - [`drkernel/kernel/scripts/rl/start_reward.sh`](drkernel/kernel/scripts/rl/start_reward.sh)
   Reward service bootstrap and environment wiring.
 - [`drkernel/kernel/rewards/reward_client.py`](drkernel/kernel/rewards/reward_client.py)
-  Reward-side aggregation, coverage computation, and RPC client path.
+  Reward-side aggregation, coverage computation, RPC client path, and the restored failure-type penalty routing for `precheck` versus compilation versus generic failures.
+- [`drkernel/kernel/config/kernel_trainer.yaml`](drkernel/kernel/config/kernel_trainer.yaml)
+  Main training reward configuration, including the active `apply_precheck_fail_penalty` / `apply_compilation_fail_penalty` toggles and penalty values.
+- [`drkernel/kernel/config/kernel_grading.yaml`](drkernel/kernel/config/kernel_grading.yaml)
+  Standalone grading reward configuration with the same failure-type penalty routing controls used for offline evaluation.
+- [`drkernel/kernel/rewards/kernel_reward.py`](drkernel/kernel/rewards/kernel_reward.py)
+  Reward extraction logic that now supports both Triton-style Python answers and CUDA-Agent multi-section answers.
+- [`drkernel/test_cuda_reward.py`](drkernel/test_cuda_reward.py)
+  Repo-local single-sample CUDA reward smoke harness for validating the `cuda_agent` path against a real sample on a GPU node.
+- [`drkernel/run_cuda_reward_dir.py`](drkernel/run_cuda_reward_dir.py)
+  Repo-local batch harness for scoring a directory of stored `result_*.json` CUDA samples through the repaired reward pipeline, with local `precheck_fail` routing and resumable JSONL output.
+- [`tests/test_cuda_agent_support.py`](tests/test_cuda_agent_support.py)
+  CUDA reward-path regression suite covering extraction, decoy detection, profiling-based reward normalization, and lazy-optimization filtering via coverage-based rejection sampling.
+- [`tests/fixtures/cuda_agent_support/`](tests/fixtures/cuda_agent_support/)
+  Dedicated CUDA / binding / model fixtures used by the CUDA reward-path regression suite.
+- [`drkernel/kernel/utils/kernel_code.py`](drkernel/kernel/utils/kernel_code.py)
+  Shared kernel-submission extraction helpers used by both reward scoring and the rollout agent.
 - [`kernelgym/server/api/server.py`](kernelgym/server/api/server.py)
   Reward API server and reference-cache provider registration.
 - [`kernelgym/workflow/reference_cache.py`](kernelgym/workflow/reference_cache.py)
   Shared reference-runtime cache provider.
+- [`kernelgym/backend/kernelbench/cuda_agent_backend.py`](kernelgym/backend/kernelbench/cuda_agent_backend.py)
+  CUDA-Agent backend implementation for compiling and loading multi-file CUDA submissions inside the current `kernelgym` backend abstraction.
+- [`kernelgym/toolkit/kernelbench/pipeline.py`](kernelgym/toolkit/kernelbench/pipeline.py)
+  KernelBench evaluation pipeline, including the performance/profiling path that now skips Triton-only coverage logic for `cuda_agent` runs.
 
 ## Core Training Codepaths
 
@@ -81,5 +103,14 @@
   TRLOO training loop, rollout, masking, and metrics.
 - [`drkernel/kernel/workers/rollout/async_server.py`](drkernel/kernel/workers/rollout/async_server.py)
   Async rollout orchestration and prompt-row accounting.
+- [`drkernel/kernel/workers/agent/kernel_agent.py`](drkernel/kernel/workers/agent/kernel_agent.py)
+  Final-answer extraction for kernel rollout turns, including the CUDA-Agent triple-section format.
 - [`kernelgym/toolkit/kernelbench/profiling.py`](kernelgym/toolkit/kernelbench/profiling.py)
   Profiling-time aggregation, including current coverage denominator logic.
+
+## CUDA RL Entry Points
+
+- [`drkernel/kernel/config/cuda_kernel_trainer.yaml`](drkernel/kernel/config/cuda_kernel_trainer.yaml)
+  Minimal Hydra overlay that enables `kernel_backend: "cuda_agent"` and switches the rollout prompt to the CUDA-specific format.
+- [`drkernel/kernel/config/prompt_config/multi_turn_cuda_kernel.yaml`](drkernel/kernel/config/prompt_config/multi_turn_cuda_kernel.yaml)
+  CUDA-specific multi-turn prompt that asks for `CUDA_KERNELS`, `APPLY_BINDINGS`, and `MODEL_NEW` sections.

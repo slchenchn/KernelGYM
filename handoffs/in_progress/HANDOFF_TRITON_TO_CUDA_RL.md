@@ -1,0 +1,290 @@
+# Triton To CUDA RL Migration Handoff
+
+## Status
+
+CUDA-Agent reward and rollout wiring is implemented in this branch, and the stored CUDA result
+directory has been fully swept once against the live reward service. The branch is not yet a clean
+published change: restart the reward service before relying on the latest backend defaults, and run
+the final CUDA RL launch with the intended model/config.
+
+The migration work is now committed locally on branch `codex/cuda-agent`.
+
+Current local commit stack:
+
+- `chore:ignore-tmp-outputs`
+- `docs:cuda-rl-handoff`
+- `test:cuda-reward-harness`
+- `reward:cuda-agent-routing`
+- `cuda:kernelgym-agent-backend`
+
+## Current Branch And Environment
+
+- Repo: `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018-cuda-agent`
+- Branch: `codex/cuda-agent`
+- Shared venv used for `.18` diagnostics:
+  `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018/.venv-vllm0180`
+- Reward endpoint used for validation:
+  `http://192.168.16.39:8111`
+- Reward workers:
+  `.39` and `.40`, `8` RTX 4090 workers each
+- GPU clocks were locked on `.39/.40` at `2700 MHz` / `400 W`
+- `.40` needed `/nfs/FM` remounted during setup
+- `watchdog==6.0.0` was installed into the `.18` shared venv and is still present
+- `pytest==7.4.3`, `pytest-asyncio==0.21.1`, and `pytest-mock==3.12.0` were installed into the
+  current local Python after user approval so the CUDA regression suite can run locally
+
+## Main CUDA Migration Changes
+
+- Added repo-native `kernelbench.cuda_agent` backend:
+  `kernelgym/backend/kernelbench/cuda_agent_backend.py`
+- Added backend dispatch/schema support for `cuda_agent`:
+  `kernelgym/backend/kernelbench/__init__.py`,
+  `kernelgym/backend/kernelbench/dispatcher.py`,
+  `kernelgym/common.py`,
+  `kernelgym/schema/task.py`,
+  `kernelgym/server/api/models.py`
+- Added CUDA-Agent response extraction:
+  `drkernel/kernel/utils/kernel_code.py`
+- Wired CUDA extraction into rollout and reward:
+  `drkernel/kernel/workers/agent/kernel_agent.py`,
+  `drkernel/kernel/rewards/kernel_reward.py`,
+  `drkernel/kernel/rewards/reward_client.py`
+- Added CUDA-specific training overlay and prompt:
+  `drkernel/kernel/config/cuda_kernel_trainer.yaml`,
+  `drkernel/kernel/config/prompt_config/multi_turn_cuda_kernel.yaml`
+- Added single-sample and directory-sweep harnesses:
+  `drkernel/test_cuda_reward.py`,
+  `drkernel/run_cuda_reward_dir.py`
+- Added regression suite and file-backed fixtures:
+  `tests/test_cuda_agent_support.py`,
+  `tests/fixtures/cuda_agent_support/`
+
+## Reward Algorithm Parity
+
+The CUDA path now preserves the Triton reward algorithm semantics rather than only compiling CUDA:
+
+- success reward still uses the original weighted/speedup formulas
+- failure routing distinguishes:
+  - `precheck_fail`
+  - `compilation_fail`
+  - correctness/generic `penalty_score`
+- decoy detection is propagated via both `decoy_kernel` and `is_decoy_kernel`
+- coverage metadata is computed for CUDA from profiler-visible `__global__` kernel names
+- lazy-optimization mitigation is tested through low/high `time_coverage` cases
+- coverage-based rejection sampling tests cover correct/incorrect and speedup escape cases
+
+Important files:
+
+- `drkernel/kernel/rewards/reward_client.py`
+- `kernelgym/toolkit/kernelbench/pipeline.py`
+- `kernelgym/toolkit/kernelbench/profiling.py`
+- `kernelgym/toolkit/validation.py`
+- `tests/test_cuda_agent_support.py`
+
+## Timing Protocol Caveat
+
+The intended training and CUDA batch-harness timing protocol is:
+
+- `num_perf_trials=50`
+- `num_warmup=30`
+- `perf_trim_count=5`
+
+This is configured in:
+
+- `drkernel/kernel/config/kernel_trainer.yaml`
+- `drkernel/run_cuda_reward_dir.py`
+
+Important fix:
+
+- Before commit `8d85ff5` / follow-up workflow fix, paired KernelBench workflow tasks preserved
+  `num_perf_trials` but did not propagate `num_warmup` or `perf_trim_count` into the derived
+  reference/kernel subtasks.
+- Therefore older workflow runs, including the completed full-set sweep below, should be interpreted
+  as `50` timed trials but effectively `3` warmup iterations and `0` trim count inside worker
+  subprocesses, despite the harness summary saying `30/5/50`.
+- This does not affect compile, correctness, local precheck, or decoy classification, but it can
+  change runtime, speedup, and any speedup-weighted reward because the intended trimmed mean was not
+  used.
+- The propagation path is now fixed in:
+  `kernelgym/workflow/kernelbench_helpers.py`
+  and `kernelgym/workflow/kernelbench.py`
+
+Recommendation:
+
+- Treat the existing full-set sweep as a compatibility/coverage smoke, not as final timing-quality
+  statistics.
+- Rerun any final CUDA reward comparison after restarting reward workers on this committed branch.
+
+## CUDA Backend Compile Path
+
+Current CUDA-Agent format expects three answer sections:
+
+- `CUDA_KERNELS`
+- `APPLY_BINDINGS`
+- `MODEL_NEW`
+
+The backend materializes these into a temporary extension project and compiles with
+`torch.utils.cpp_extension.load`. This means compile/load time dominates successful samples.
+
+Recent compile-path optimizations:
+
+- `BindingRegistry` is now header-only, removing the per-sample `binding_registry.cpp` compile unit.
+- Work directories now prefer `/dev/shm/kernelgym_cuda_agent_*` when tmpfs has at least `512 MiB`
+  free.
+- `KERNELGYM_CUDA_AGENT_TMPDIR` can explicitly override the work-dir parent.
+- The backend falls back to the default temp directory if `/dev/shm` is unavailable or too small.
+
+Observed simple-sample compile numbers on `.18`:
+
+- pre-optimization cold compile/load was roughly `15-18s`
+- header-only removed one fixed translation unit, saving roughly `1s` in one A/B check
+- `/dev/shm` compile smoke succeeded with work dir
+  `/dev/shm/kernelgym_cuda_agent_7cq7zuus` and took `16.93s`
+
+Do not expect `/dev/shm` to turn `15s` into `1s`: most time is `nvcc/c++/pybind/ATen` compilation,
+not file I/O.
+
+## Timeout And Reference Cache
+
+Current intended CUDA defaults for new runs:
+
+- CUDA batch harness `--task-timeout`: `30s`
+- CUDA overlay `reward_model.task_timeout`: `30s`
+- CUDA batch harness remote tasks default `use_reference_cache=True`
+- opt out via `--no-reference-cache`
+
+Important caveat:
+
+- The full-set sweep described below was launched before these latest defaults.
+- The currently running reward service was also launched before the `/dev/shm` backend change.
+- Restart reward workers before expecting `/dev/shm` temp dirs or the latest backend code server-side.
+- The full-set sweep also ran before the workflow timing-parameter propagation fix described above.
+
+## Full-Set CUDA Reward Sweep
+
+Input:
+
+- `/nfs/FM/gongoubo/cuda_kernel/parallel_drkernel_minimax_results`
+
+Output:
+
+- `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018-cuda-agent/tmp/cuda_reward_fullset_20260420_1251`
+
+Final summary:
+
+- total: `8920`
+- completed: `7385`
+- failed: `1535`
+- server_fail: `1444`
+- local_precheck_fail: `91`
+- reward_nonzero: `5380`
+- compiled_true: `7377`
+- correct_true: `4195`
+- decoy_true: `8`
+
+Timing caveat:
+
+- Harness summary recorded `num_perf_trials=50`, `num_warmup=30`, and `perf_trim_count=5`.
+- Because the server-side paired workflow did not yet propagate warmup/trim into child tasks, actual
+  worker timing used `num_perf_trials=50`, `num_warmup=3`, and `perf_trim_count=0`.
+- Do not use this sweep as the final answer for speedup distribution or reward-quality comparisons.
+
+Dominant failure classes:
+
+- `Task failed due to kernel compilation error`: `1094`
+- `Kernel evaluation failed: 'NoneType' object has no attribute 'metadata'`: `221`
+- `Task failed: code pre-check error`: `91`
+- `Reward hacking: Decoy kernel detected`: `8`
+
+Representative manual spot checks were performed for:
+
+- local precheck
+- compilation failure
+- timeout
+- metadata `None`
+- decoy
+- successful reward `1.0`
+- low-performance correct reward
+- compiled incorrect reward
+- generic runtime failure
+
+## Tests And Verification
+
+Checks that passed:
+
+- `python -m py_compile kernelgym/backend/kernelbench/cuda_agent_backend.py kernelgym/toolkit/kernelbench/pipeline.py kernelgym/toolkit/kernelbench/profiling.py kernelgym/toolkit/validation.py kernelgym/workflow/kernelbench.py kernelgym/workflow/kernelbench_helpers.py drkernel/kernel/event_logging.py drkernel/kernel/rewards/reward_client.py drkernel/kernel/rewards/kernel_reward.py drkernel/kernel/workers/agent/kernel_agent.py drkernel/run_cuda_reward_dir.py drkernel/test_cuda_reward.py tests/test_cuda_agent_support.py`
+- `python -m pytest -q tests/test_cuda_agent_support.py`
+  - result: `37 passed`
+- `git diff --check`
+- scaffold check confirming no generated `binding_registry.cpp`
+- `.18` CUDA compile smoke through the backend
+- `.18` tokenizer smoke for `/nfs/FM/chenshuailin/checkpoints/Qwen/Qwen3.5-27B`
+
+Remaining environment note:
+
+- Local Python now has pytest installed.
+- The `.18` shared venv may still not have pytest; check before running tests there.
+
+## Current Max Model Length
+
+For the active 14B eager script:
+
+- `MAX_PROMPT_LENGTH=10240`
+- `MAX_RESPONSE_LENGTH=8192`
+- `actor_rollout_ref.rollout.max_model_len=None`
+- vLLM rollout code computes `max_model_len = prompt_length + response_length`
+- effective vLLM context length is therefore `18432`
+
+Other numbers that are easy to confuse:
+
+- `8192` is response length and PPO micro token in the active script.
+- `16384` is logprob/ref token micro limit (`PPO_MICRO_TOKEN * 2`), not context length.
+- `19432` is `max_num_batched_tokens = 10240 + 8192 + 1000`, not context length.
+
+Relevant code:
+
+- `drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh`
+- `drkernel/kernel/scripts/rl/train_rl_common.sh`
+- `drkernel/kernel/workers/rollout/vllm_rollout/vllm_async_engine.py`
+- `drkernel/kernel/workers/rollout/vllm_rollout/vllm_async_engine_multi_iter.py`
+
+## Qwen3.5-27B Chat Template Note
+
+Model path under discussion:
+
+- `/nfs/FM/chenshuailin/checkpoints/Qwen/Qwen3.5-27B`
+
+This path is a symlink to:
+
+- `/nfs/FM/chenshuailin/checkpoints/Qwen/Qwen3___5-27B`
+
+Tokenizer facts:
+
+- `tokenizer_config.json` has a `chat_template`
+- `.18` can load it as `Qwen2TokenizerFast`
+- rendered prompt starts with:
+  `<|im_start|>user ... <|im_start|>assistant\n<think>\n`
+- `eos_token_id=248046`
+- `pad_token_id=248044`
+
+Recommendation:
+
+- Do not blindly enable `trainer.fix_qwen3_chat_template` for this model.
+- That switch overwrites the model's own template with the repo's older `QWEN3CHATTEMPLATE`.
+- If no-thinking behavior is needed, check whether rollout can pass `enable_thinking=False` into
+  `apply_chat_template`; the current rollout code does not appear to pass it.
+
+## Open Follow-Ups
+
+- Restart reward service so `/dev/shm`, header-only scaffold, and latest CUDA backend code take
+  effect on `.39/.40`.
+- Decide whether to rerun the full-set sweep with:
+  - `task_timeout=30`
+  - reference cache enabled
+  - restarted reward workers
+  - actual child-task timing protocol `num_warmup=30`, `perf_trim_count=5`, `num_perf_trials=50`
+- Investigate the `NoneType.metadata` failure class; it remains a server-side failure category in
+  the full sweep.
+- Decide whether to implement deeper compile acceleration. Content-hash extension caching is low
+  value for the existing full-set data because all `8920` candidate hashes are unique, but it may
+  help repeated RL outputs and retries.

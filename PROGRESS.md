@@ -1,5 +1,36 @@
 # Progress
 
+#### CUDA RL prompts now split backend-neutral data from CUDA-Agent templates
+
+##### Problem & Impact
+
+- The materialized RL and validation parquet files still stored the original first-turn Triton prompt in the data itself, so even the CUDA overlay only changed follow-up feedback turns while the first rollout turn started with Triton instructions and examples.
+- This made the data backend-specific and prevented clean switching between Triton/CUDA prompt templates.
+
+##### Resolution
+
+- Added `drkernel/kernel/scripts/materialize_backend_neutral_data.py` to extract only the fenced PyTorch model architecture from the source prompt and write backend-neutral parquet files under the current repo's `drkernel/data`.
+- Generated:
+  - `drkernel/data/drkernel-rl-data-neutral/cuda_llm_rl_thinking_1025.parquet`
+  - `drkernel/data/drkernel-validation-data-neutral/validation_data_thinking.parquet`
+- Generated matching human-readable text copies for manual prompt inspection:
+  - `drkernel/data/drkernel-rl-data-neutral/cuda_llm_rl_thinking_1025.txt`
+  - `drkernel/data/drkernel-validation-data-neutral/validation_data_thinking.txt`
+- Generated a deterministic 100-row sample of train prompts after CUDA first-turn formatting:
+  - `drkernel/data/drkernel-rl-data-neutral/cuda_llm_rl_thinking_1025.formatted_sample100.txt`
+- Updated `drkernel/kernel/config/prompt_config/multi_turn_cuda_kernel.yaml` so the first turn puts CUDA-Agent instructions and the required `CUDA_KERNELS` / `APPLY_BINDINGS` / `MODEL_NEW` output format before the neutral PyTorch problem, then ends with `Let's think step by step.`.
+- Updated the RL launcher path so `HYDRA_CONFIG_NAME` can select `cuda_kernel_trainer`, and made the current `14b_coldstart_trloo_mrs_pr_prs.sh` default to the CUDA config, neutral data, and `30s` CUDA reward timeout.
+- Compared against `/nfs/FM/lihongbin/CODE/KernelGYM`: that external CUDA path keeps the long CUDA first-turn prompt and CUDA skeleton examples materialized inside parquet `user` messages, while its `multi_turn_cuda_kernel.yaml` leaves `first_turn.template: null` and only controls feedback turns.
+
+##### Result & Current State
+
+- The generated neutral train parquet has `71996` rows, with `0` rows containing `Triton` and `0` rows containing CUDA-Agent section markers.
+- The generated neutral validation parquet has `100` rows, with `0` rows containing `Triton` and `0` rows containing CUDA-Agent section markers.
+- Some train rows still contain the literal word `cuda` inside the PyTorch problem code itself, for example `device="cuda"` in `get_inputs`; these are problem semantics, not prompt/template instructions.
+- Follow-up code inspection found that only `data.system_prompt_config` creates a true `role=system` message, and the CUDA launcher path does not set it; `prompt_config_path` per-turn templates are user-message content, and the shared rollout helper now supports a `{problem}` placeholder so the CUDA first-turn template controls where the neutral PyTorch problem appears.
+- The text copies have the expected row separators: `71996` train rows and `100` validation rows; the formatted sample has `100` sampled train prompts with `100` CUDA output-format instructions and `100` neutral PyTorch model prompts.
+- `tests/test_backend_neutral_data.py` and the expanded `tests/test_prompt_templates.py` pass, and the broader targeted CUDA support regression set passes `70/70`.
+
 #### CUDA reward comparison against the external KernelGYM repo found one local parameter-propagation gap
 
 ##### Problem & Impact

@@ -1,5 +1,9 @@
+hydra:
+  searchpath:
+    - file://verl_patch/trainer/code/config
+
 defaults:
-  - kernel_trainer
+  - kernel_trainer_core
   - _self_
 
 reward_model:
@@ -8,5 +12,8 @@ reward_model:
 
 actor_rollout_ref:
   rollout:
+    engine_kwargs:
+      vllm:
+        language_model_only: true
     multi_turn:
       prompt_config_path: kernel/config/prompt_config/multi_turn_cuda_kernel.yaml

@@ -48,6 +48,7 @@ The repository's top-level harness files are the stable operational documents th
 8. Keep local git history clean while work is still unpublished:
    - if commit scope needs to change, rewrite the local commits instead of adding follow-up "remove from commit" or "fix previous commit scope" commits
    - do not create a commit and then immediately compensate for it with another local cleanup commit when the history can still be rewritten safely
+9. For any artifact, behavior, or result that can be practically manually reviewed, inspect representative real examples in addition to automated checks. When useful, dump reviewable prompts, data samples, logs, model outputs, scored examples, or other concrete artifacts to text files so the user can inspect the same evidence.
 
 ## Execution Policy
 

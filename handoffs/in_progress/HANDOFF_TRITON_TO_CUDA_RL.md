@@ -2,15 +2,27 @@
 
 ## Status
 
-CUDA-Agent reward and rollout wiring is implemented in this branch, and the stored CUDA result
-directory has been fully swept once against the live reward service. The branch is not yet a clean
-published change: restart the reward service before relying on the latest backend defaults, and run
-the final CUDA RL launch with the intended model/config.
+CUDA reward and rollout wiring is implemented in this branch. A historical stored CUDA result
+directory was fully swept once against the live reward service, and the latest `.18`
+Qwen3-14B TP=1 smoke16 validates the current backend after the tokenizer-history,
+feedback-compaction, and backend error-propagation fixes.
+
+The full-set sweep is still useful as a broad compatibility sweep, but it predates several fixes
+that now matter for CUDA RL quality:
+
+- tokenizer-native multi-turn assistant-history handling for Qwen3-style reasoning output
+- compact later-turn feedback payloads instead of reinjecting large raw tracebacks/build logs
+- explicit failed-result propagation for backend compile-retry / lock-error / unexpected-`None`
+  paths
+- the `/dev/shm noexec` fallback in the CUDA extension backend
 
 The migration work is now committed locally on branch `codex/cuda-agent`.
 
 Current local commit stack:
 
+- `docs:cuda-rl-notes`
+- `rl:cuda-neutral-launcher`
+- `prompt:cuda-neutral-data`
 - `chore:ignore-tmp-outputs`
 - `docs:cuda-rl-handoff`
 - `test:cuda-reward-harness`
@@ -43,7 +55,7 @@ Current local commit stack:
   `kernelgym/common.py`,
   `kernelgym/schema/task.py`,
   `kernelgym/server/api/models.py`
-- Added CUDA-Agent response extraction:
+- Added CUDA response extraction:
   `drkernel/kernel/utils/kernel_code.py`
 - Wired CUDA extraction into rollout and reward:
   `drkernel/kernel/workers/agent/kernel_agent.py`,
@@ -55,7 +67,7 @@ Current local commit stack:
 - The first-turn CUDA prompt is now split from the dataset:
   - source data is materialized into backend-neutral parquet files containing only the PyTorch model
     problem prompt
-  - CUDA-Agent instructions live in the first-turn template in
+  - CUDA instructions live in the first-turn template in
     `drkernel/kernel/config/prompt_config/multi_turn_cuda_kernel.yaml`
   - materialization script:
     `drkernel/kernel/scripts/materialize_backend_neutral_data.py`
@@ -74,6 +86,19 @@ Current local commit stack:
     the complete first-turn user prompt after injecting the CUDA first-turn template.
   - It uses `==================== sample N source_row M ====================` separators so each
     sample can be traced back to the original train parquet row.
+- Current CUDA multi-template review dumps from real data:
+  - `drkernel/data/drkernel-validation-data-neutral/validation_data_thinking.cuda_template_review_sample.txt`
+  - `drkernel/data/drkernel-rl-data-neutral/cuda_llm_rl_thinking_1025.cuda_template_sample100.txt`
+  - The validation dump renders rows `0,1,2,7,42` through every current first-turn template and both
+    tool-feedback templates so prompt placement and later-turn feedback can be reviewed manually.
+  - The train dump renders `100` deterministic rows from the real train parquet with random
+    first-turn template selection, using the same source-row separators as the older formatted sample.
+  - Manual inspection confirmed that the CUDA section contract appears before the neutral PyTorch
+    problem, each first-turn prompt has one problem intro without an extra `reference pytorch code:`
+    / `Reference problem:` heading, feedback is inserted once, and the
+    rendered review dumps contain no active `Triton` instruction residue or unrendered
+    `{{ problem }}` / `{{ feedback }}` placeholders. Case-insensitive `triton` appears only in dump
+    metadata naming `migrate_from_triton.jinja`.
 - Prompt comparison against `/nfs/FM/lihongbin/CODE/KernelGYM`:
   - External CUDA data keeps the full CUDA first-turn prompt materialized directly inside every
     parquet `prompt` row as a `user` message.
@@ -83,23 +108,43 @@ Current local commit stack:
     `CUDA_KERNELS`, `APPLY_BINDINGS`, and `MODEL_NEW`, plus strict "no torch ops" rules.
   - Current branch deliberately keeps parquet rows backend-neutral and injects CUDA first-turn
     instructions through `drkernel/kernel/config/prompt_config/multi_turn_cuda_kernel.yaml`.
-  - The CUDA first-turn template uses `{problem}` to insert the neutral PyTorch problem after the
-    CUDA output-format instructions, then ends the user message with `Let's think step by step.`.
-  - Current branch's CUDA first-turn template is shorter and currently rule/format focused; it does
-    not include the external repo's CUDA skeleton examples.
+  - The CUDA config now points to template directories, not inline prompt text:
+    `cuda_templates/first_turn` and `cuda_templates/tool_response`.
+  - Each directory may contain multiple `.jinja` templates; rollout loads the directory and randomly
+    selects one concrete template at use time.
+  - Current first-turn templates are `csl_cuda_agent.jinja`, `lhb_v3.jinja`, and
+    `migrate_from_triton.jinja`.
+  - Current tool-response templates are `default.jinja` and `short.jinja`.
+  - First-turn templates use Jinja `{{ problem }}` to insert the neutral PyTorch problem after the
+    CUDA output section contract.
+  - Tool-response templates use Jinja `{{ feedback }}` and intentionally avoid restating the full
+    first-turn CUDA constraints.
 - Prompt role semantics:
   - `data.system_prompt_config`, if explicitly configured with `apply_chat_template=True`, is the
     path that creates a real `{"role": "system"}` message before tokenizer chat-template rendering.
   - The active CUDA RL path does not currently set `data.system_prompt_config`.
   - `actor_rollout_ref.rollout.multi_turn.prompt_config_path` per-turn templates are not converted
     into `system` role messages.
-  - Current code applies a non-null `first_turn.template` to the existing first `user` prompt
-    content; templates can use `{problem}` to decide exactly where the neutral PyTorch problem is
-    inserted.
+  - Current code loads non-null first-turn templates from `template_dir` and applies one randomly
+    selected template to the existing first `user` prompt content; templates can use Jinja
+    `{{ problem }}` to decide exactly where the neutral PyTorch problem is inserted.
   - Later feedback turns are user-message feedback turns: the reward feedback is wrapped by the
-    `tool_response` template and then added to the conversation as a user/tool-feedback message.
-  - Therefore the active CUDA first-turn instructions are semantically part of the user message, not
-    a model-specific system-message segment separated by chat-template system tokens.
+    Jinja `{{ feedback }}` slot in the `tool_response` template and then added to the conversation as
+    a user/tool-feedback message.
+- Therefore the active CUDA first-turn instructions are semantically part of the user message, not
+  a model-specific system-message segment separated by chat-template system tokens.
+- Multi-turn rollout now preserves tokenizer-native assistant message structure instead of merging
+  reasoning back into plain `content`:
+  `drkernel/kernel/workers/rollout/vllm_rollout/chat_template_utils.py`,
+  `drkernel/kernel/workers/rollout/vllm_rollout/vllm_async_engine.py`,
+  `drkernel/kernel/workers/rollout/vllm_rollout/openai_async_engine_multi_iter.py`
+- This is important for Qwen3/Qwen3.5 because assistant history may carry either
+  `reasoning_content` or inline `<think>...</think>` text; by letting
+  `tokenizer.apply_chat_template(...)` handle the assistant-history message directly, later turns
+  no longer naively carry forward prior think traces.
+- Later-turn reward/tool feedback is now compacted before reinjection so the next user turn gets a
+  short actionable error summary instead of full tracebacks or full extension build logs:
+  `drkernel/kernel/event_logging.py`
 - Added single-sample and directory-sweep harnesses:
   `drkernel/test_cuda_reward.py`,
   `drkernel/run_cuda_reward_dir.py`
@@ -120,11 +165,15 @@ The CUDA path now preserves the Triton reward algorithm semantics rather than on
 - coverage metadata is computed for CUDA from profiler-visible `__global__` kernel names
 - lazy-optimization mitigation is tested through low/high `time_coverage` cases
 - coverage-based rejection sampling tests cover correct/incorrect and speedup escape cases
+- backend failure routing now returns explicit failed `KernelExecResult` metadata for compile-retry,
+  lock-error, and unexpected `None` pipeline paths instead of collapsing them into later
+  `'NoneType' object has no attribute 'metadata'` failures
 
 Important files:
 
 - `drkernel/kernel/rewards/reward_client.py`
 - `kernelgym/toolkit/kernelbench/pipeline.py`
+- `kernelgym/toolkit/kernelbench/toolkit.py`
 - `kernelgym/toolkit/kernelbench/profiling.py`
 - `kernelgym/toolkit/validation.py`
 - `tests/test_cuda_agent_support.py`
@@ -161,11 +210,11 @@ Recommendation:
 
 - Treat the existing full-set sweep as a compatibility/coverage smoke, not as final timing-quality
   statistics.
-- Rerun any final CUDA reward comparison after restarting reward workers on this committed branch.
+- Rerun any final CUDA reward comparison on reward workers running this committed branch.
 
 ## CUDA Backend Compile Path
 
-Current CUDA-Agent format expects three answer sections:
+Current CUDA format expects three answer sections:
 
 - `CUDA_KERNELS`
 - `APPLY_BINDINGS`
@@ -188,6 +237,8 @@ Observed simple-sample compile numbers on `.18`:
 - header-only removed one fixed translation unit, saving roughly `1s` in one A/B check
 - `/dev/shm` compile smoke succeeded with work dir
   `/dev/shm/kernelgym_cuda_agent_7cq7zuus` and took `16.93s`
+- if `/dev/shm` is mounted `noexec`, the backend now detects that case and falls back to a normal
+  temp directory before loading the compiled `.so`
 
 Do not expect `/dev/shm` to turn `15s` into `1s`: most time is `nvcc/c++/pybind/ATen` compilation,
 not file I/O.
@@ -204,11 +255,16 @@ Current intended CUDA defaults for new runs:
 Important caveat:
 
 - The full-set sweep described below was launched before these latest defaults.
-- The currently running reward service was also launched before the `/dev/shm` backend change.
-- Restart reward workers before expecting `/dev/shm` temp dirs or the latest backend code server-side.
+- The historical full-set sweep also predates the tokenizer-history, feedback-compaction,
+  backend-error-propagation, and `/dev/shm noexec` fallback fixes described above.
+- The later `.18` Qwen3-14B smoke runs used restarted reward workers on the updated branch, so they
+  reflect the current server-side CUDA backend behavior.
 - The full-set sweep also ran before the workflow timing-parameter propagation fix described above.
 
 ## Full-Set CUDA Reward Sweep
+
+This section is a historical pre-fix compatibility sweep, not the final statement of current CUDA
+failure distribution.
 
 Input:
 
@@ -244,6 +300,12 @@ Dominant failure classes:
 - `Task failed: code pre-check error`: `91`
 - `Reward hacking: Decoy kernel detected`: `8`
 
+Important interpretation note:
+
+- The `221` `NoneType.metadata` failures came from the historical pre-fix sweep above.
+- The current backend now returns explicit failed results for those paths; the newer Qwen3-14B
+  smoke below showed `0` fresh `NoneType.metadata` occurrences in `main.log`.
+
 Representative manual spot checks were performed for:
 
 - local precheck
@@ -256,6 +318,63 @@ Representative manual spot checks were performed for:
 - compiled incorrect reward
 - generic runtime failure
 
+## Qwen3-14B TP=1 Smoke After Backend Fix
+
+Purpose:
+
+- validate the current backend/prompt plumbing on `.18` after the tokenizer-history,
+  feedback-compaction, and backend error-propagation fixes
+- manually inspect real rendered outputs and graded results before scaling back to larger evals
+
+Run:
+
+- model: `/nfs/FM/chenshuailin/checkpoints/Qwen/Qwen3-14B`
+- run dir:
+  `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018-cuda-agent/drkernel/logs/cuda-qwen3-14b-tp1-smoke16-backendfix-temp1.0-w5t50trim.run.20260422-053812`
+- output dir:
+  `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018-cuda-agent/drkernel/logs/cuda-qwen3-14b-tp1-smoke16-backendfix-temp1.0-w5t50trim.run.20260422-053812/eval_results/step_0`
+- manual review summary:
+  `/nfs/FM/chenshuailin/projects/kernel_agents/KernelGYM-vllm018-cuda-agent/drkernel/logs/cuda-qwen3-14b-tp1-smoke16-backendfix-temp1.0-w5t50trim.run.20260422-053812/eval_results/step_0/manual_review_summary.md`
+- config highlights:
+  `ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE=1`, `MAX_RESPONSE_LENGTH=12000`, `REFERENCE_CACHE_ENABLE=true`,
+  `REWARD_TASK_TIMEOUT=30`
+- operational note:
+  TP=1 means no tensor-parallel sharding inside each rollout worker, but this offline eval still
+  used `8` rollout workers / `8` GPUs on `.18`
+
+Validated artifacts:
+
+- `metrics.json`
+- `graded_results.parquet`
+- `graded_results_conversations.jsonl`
+- `raw_responses.jsonl`
+- per-problem `eval_outputs/`
+- `manual_review_summary.md`
+
+Key metrics:
+
+- `val/test_score/kernelbench_level2_validation = -0.2704161008199056`
+- `val/kernel/final/correctness_rate = 0.0625`
+- `val/kernel/best_by_turn_3/correctness_rate = 0.125`
+- `val/kernel/turn_1/compilation_rate = 0.125`
+- `val/kernel/turn_2/compilation_rate = 0.25`
+- `val/kernel/turn_3/compilation_rate = 0.1875`
+
+Manual review conclusions:
+
+- `problem_0_sample_0`: turn 1 included `<think>...</think>`, but turns `1/2/3` were all
+  `correctness=true`; this validates that current extraction/reward plumbing is compatible with
+  Qwen3 reasoning output when assistant history is passed through the tokenizer-native path
+- `problem_12_sample_0`: turn 1 failed to compile, turn 2 recovered and succeeded, turn 3 regressed;
+  later-turn feedback now works, but final answer selection / prompt quality is still unstable
+- `problem_10_sample_0`: turn 1 failed with `missing class ModelNew`, later turns added `ModelNew`
+  but still failed precheck/compile; remaining failures are now explicit quality failures instead
+  of backend `None` propagation
+- `main.log` had `0` new matches for `'NoneType' object has no attribute 'metadata'`
+- the current dominant failures are model/prompt quality issues such as missing `cuda_extension`,
+  malformed `REGISTER_BINDING(...)`, generic CUDA compilation failures, occasional missing
+  `ModelNew`, and a small number of `30s` timeouts
+
 ## Tests And Verification
 
 Checks that passed:
@@ -263,6 +382,9 @@ Checks that passed:
 - `python -m py_compile kernelgym/backend/kernelbench/cuda_agent_backend.py kernelgym/toolkit/kernelbench/pipeline.py kernelgym/toolkit/kernelbench/profiling.py kernelgym/toolkit/validation.py kernelgym/workflow/kernelbench.py kernelgym/workflow/kernelbench_helpers.py drkernel/kernel/event_logging.py drkernel/kernel/rewards/reward_client.py drkernel/kernel/rewards/kernel_reward.py drkernel/kernel/workers/agent/kernel_agent.py drkernel/kernel/workers/rollout/prompt_templates.py drkernel/kernel/workers/rollout/vllm_rollout/vllm_async_engine.py drkernel/kernel/workers/rollout/vllm_rollout/vllm_async_engine_multi_iter.py drkernel/kernel/workers/rollout/vllm_rollout/openai_async_engine_multi_iter.py drkernel/run_cuda_reward_dir.py drkernel/test_cuda_reward.py tests/test_cuda_agent_support.py`
 - `python -m pytest -q tests/test_prompt_templates.py tests/test_backend_neutral_data.py tests/test_cuda_agent_support.py`
   - result: `70 passed`
+- `PYTHONPATH=$PWD:$PWD/drkernel pytest -q tests/test_cuda_agent_support.py -k 'build_prompt_feedback_payload or truncate_feedback_for_prompt or handles_none_pipeline_result or compile_retry_error_returns_failed_result'`
+  - result: `7 passed`
+- `python -m py_compile kernelgym/toolkit/kernelbench/pipeline.py kernelgym/toolkit/kernelbench/toolkit.py tests/test_cuda_agent_support.py`
 - `git diff --check`
 - scaffold check confirming no generated `binding_registry.cpp`
 - `.18` CUDA compile smoke through the backend
@@ -296,6 +418,18 @@ Relevant code:
 - `drkernel/kernel/workers/rollout/vllm_rollout/vllm_async_engine.py`
 - `drkernel/kernel/workers/rollout/vllm_rollout/vllm_async_engine_multi_iter.py`
 
+## Current Qwen3.5 CUDA RL Launcher
+
+The Qwen3.5 CUDA smoke should use:
+
+- `drkernel/kernel/scripts/rl/cuda_qwen3_5_27b_trloo_hfsdp8_pytorch_eager.sh`
+
+It is based on:
+
+- `drkernel/kernel/scripts/rl/14b_coldstart_trloo_hfsdp8_pytorch_eager.sh`
+
+Do not use `14b_coldstart_trloo_mrs_pr_prs.sh` as the reference for this Qwen3.5 CUDA smoke. The Qwen launcher keeps the hfsdp8 pytorch-eager reward/timing algorithm and only overrides CUDA-neutral data, `cuda_kernel_trainer`, Qwen3.5 model path, TP=2, `MAX_RESPONSE_LENGTH=12000`, single-node `.18` memory settings, and the offload needed for colocated actor/vLLM startup.
+
 ## Qwen3.5-27B Chat Template Note
 
 Model path under discussion:
@@ -324,15 +458,17 @@ Recommendation:
 
 ## Open Follow-Ups
 
-- Restart reward service so `/dev/shm`, header-only scaffold, and latest CUDA backend code take
-  effect on `.39/.40`.
 - Decide whether to rerun the full-set sweep with:
   - `task_timeout=30`
   - reference cache enabled
-  - restarted reward workers
+  - current fixed reward workers
   - actual child-task timing protocol `num_warmup=30`, `perf_trim_count=5`, `num_perf_trials=50`
-- Investigate the `NoneType.metadata` failure class; it remains a server-side failure category in
-  the full sweep.
+- If a refreshed full-set failure distribution is needed, rerun it on the current branch; the old
+  `221` `NoneType.metadata` count is historical and predates the backend failed-result fix.
+- Improve prompt/model quality for CUDA outputs. The main remaining failure classes in the current
+  smoke are missing `cuda_extension`, malformed `REGISTER_BINDING(...)`, generic CUDA compile
+  errors, occasional missing `ModelNew`, and regressions where turn 2 succeeds but turn 3 falls
+  back to a worse answer.
 - Decide whether to implement deeper compile acceleration. Content-hash extension caching is low
   value for the existing full-set data because all `8920` candidate hashes are unique, but it may
   help repeated RL outputs and retries.

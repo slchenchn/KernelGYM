@@ -72,6 +72,11 @@ ROLLOUT_MODE=${ROLLOUT_MODE:-"sync"}                # "sync", "async_vllm", "asy
 ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE=${ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE:-1}
 ROLLOUT_GPU_MEMORY_UTIL=${ROLLOUT_GPU_MEMORY_UTIL:-0.75}
 ROLLOUT_ENFORCE_EAGER=${ROLLOUT_ENFORCE_EAGER:-False}
+ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS:-}
+ROLLOUT_DISABLE_LOG_STATS=${ROLLOUT_DISABLE_LOG_STATS:-}
+ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN:-}
+VLLM_LANGUAGE_MODEL_ONLY=${VLLM_LANGUAGE_MODEL_ONLY:-}
+PROMPT_CONFIG_PATH=${PROMPT_CONFIG_PATH:-}
 
 BACKEND=${BACKEND:-"vllm"}
 OPENAI_MODEL=${OPENAI_MODEL:-""}
@@ -86,6 +91,11 @@ OPENAI_MAX_CONCURRENCY=${OPENAI_MAX_CONCURRENCY:-64}
 REWARD_MANAGER=${REWARD_MANAGER:-"kernel_async"}
 REWARD_SERVER_URL=${REWARD_SERVER_URL:-"${KERNELGYM_SERVER_URL}"}
 REWARD_FUNC_NAME=${REWARD_FUNC_NAME:-"calculate_reward_weighted"}
+KERNEL_BACKEND=${KERNEL_BACKEND:-}
+DETECT_DECOY_KERNEL=${DETECT_DECOY_KERNEL:-}
+COVERAGE_REWARD_TYPE=${COVERAGE_REWARD_TYPE:-}
+COVERAGE_REWARD_ENABLE=${COVERAGE_REWARD_ENABLE:-}
+COVERAGE_REWARD_WEIGHT=${COVERAGE_REWARD_WEIGHT:-}
 
 # Kernel Reward Parameters
 REWARD_ENHANCED=${REWARD_ENHANCED:-True}
@@ -103,6 +113,9 @@ NUM_WARMUP=${NUM_WARMUP:-3}
 PERF_TRIM_COUNT=${PERF_TRIM_COUNT:-0}
 NUM_CORRECT_TRIALS=${NUM_CORRECT_TRIALS:-5}
 SPEEDUP_REWARD_UPPER_BOUND=${SPEEDUP_REWARD_UPPER_BOUND:-3.0}
+REFERENCE_CACHE_ENABLE=${REFERENCE_CACHE_ENABLE:-}
+REFERENCE_CACHE_AUTO_UUID=${REFERENCE_CACHE_AUTO_UUID:-}
+REFERENCE_CACHE_FORCE_REFRESH=${REFERENCE_CACHE_FORCE_REFRESH:-}
 
 # Reward Weights (compilation, correctness, performance)
 REWARD_WEIGHTS=${REWARD_WEIGHTS:-"0.3_0.4_0.3"}
@@ -117,7 +130,7 @@ REWARD_PENALTY_PERF_DEGRADE=${REWARD_PENALTY_PERF_DEGRADE:--0.1}
 CUSTOM_REWARD_PATH=${CUSTOM_REWARD_PATH:-"kernel/rewards/kernel_reward.py"}
 CUSTOM_REWARD_NAME=${CUSTOM_REWARD_NAME:-"compute_kernel_reward_batch"}
 
-MAX_NUM_BATCHED_TOKENS=$(expr $MAX_PROMPT_LENGTH + $MAX_RESPONSE_LENGTH + 1000)
+MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-}
 
 # System Configuration
 NNODES=${NNODES:-${ARNOLD_WORKER_NUM:-1}}
@@ -131,6 +144,7 @@ FIX_QWEN3_CHAT_TEMPLATE=${FIX_QWEN3_CHAT_TEMPLATE:-False}
 # Project and Experiment Names
 PROJECT_NAME=${PROJECT_NAME:-"kernel-grading"}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-""}              # Will be auto-generated
+TRAINER_LOGGER=${TRAINER_LOGGER:-}
 
 # =============================================================================
 # Helper Functions
@@ -293,9 +307,19 @@ parse_arguments() {
       --rollout_tp) ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE="$2"; shift 2 ;;
       --rollout_gpu_memory_util) ROLLOUT_GPU_MEMORY_UTIL="$2"; shift 2 ;;
       --rollout_enforce_eager) ROLLOUT_ENFORCE_EAGER="$2"; shift 2 ;;
+      --rollout_max_num_seqs) ROLLOUT_MAX_NUM_SEQS="$2"; shift 2 ;;
+      --rollout_disable_log_stats) ROLLOUT_DISABLE_LOG_STATS="$2"; shift 2 ;;
+      --rollout_max_model_len) ROLLOUT_MAX_MODEL_LEN="$2"; shift 2 ;;
+      --vllm_language_model_only) VLLM_LANGUAGE_MODEL_ONLY="$2"; shift 2 ;;
+      --prompt_config_path) PROMPT_CONFIG_PATH="$2"; shift 2 ;;
       --reward_manager) REWARD_MANAGER="$2"; shift 2 ;;
       --reward_server_url) REWARD_SERVER_URL="$2"; shift 2 ;;
       --reward_func_name) REWARD_FUNC_NAME="$2"; shift 2 ;;
+      --kernel_backend) KERNEL_BACKEND="$2"; shift 2 ;;
+      --detect_decoy_kernel) DETECT_DECOY_KERNEL="$2"; shift 2 ;;
+      --coverage_reward_type) COVERAGE_REWARD_TYPE="$2"; shift 2 ;;
+      --coverage_reward_enable) COVERAGE_REWARD_ENABLE="$2"; shift 2 ;;
+      --coverage_reward_weight) COVERAGE_REWARD_WEIGHT="$2"; shift 2 ;;
       --reward_enhanced) REWARD_ENHANCED="$2"; shift 2 ;;
       --reward_use_sandbox_rate_limit) REWARD_USE_SANDBOX_RATE_LIMIT="$2"; shift 2 ;;
       --reward_rate_limit) REWARD_RATE_LIMIT="$2"; shift 2 ;;
@@ -311,6 +335,9 @@ parse_arguments() {
       --perf_trim_count) PERF_TRIM_COUNT="$2"; shift 2 ;;
       --num_correct_trials) NUM_CORRECT_TRIALS="$2"; shift 2 ;;
       --speedup_reward_upper_bound) SPEEDUP_REWARD_UPPER_BOUND="$2"; shift 2 ;;
+      --reference_cache_enable) REFERENCE_CACHE_ENABLE="$2"; shift 2 ;;
+      --reference_cache_auto_uuid) REFERENCE_CACHE_AUTO_UUID="$2"; shift 2 ;;
+      --reference_cache_force_refresh) REFERENCE_CACHE_FORCE_REFRESH="$2"; shift 2 ;;
       --custom_reward_path) CUSTOM_REWARD_PATH="$2"; shift 2 ;;
       --custom_reward_name) CUSTOM_REWARD_NAME="$2"; shift 2 ;;
       --nnodes) NNODES="$2"; shift 2 ;;
@@ -318,6 +345,7 @@ parse_arguments() {
       --fix_qwen3_chat_template) FIX_QWEN3_CHAT_TEMPLATE="$2"; shift 2 ;;
       --project_name) PROJECT_NAME="$2"; shift 2 ;;
       --experiment_name) EXPERIMENT_NAME="$2"; shift 2 ;;
+      --trainer_logger) TRAINER_LOGGER="$2"; shift 2 ;;
       --gradio_visualization) GRADIO_VISUALIZATION="$2"; shift 2 ;;
       --gradio_share) GRADIO_SHARE="$2"; shift 2 ;;
       --visualize_only) VISUALIZE_ONLY="$2"; shift 2 ;;
@@ -384,6 +412,10 @@ setup_grading_environment() {
   echo "  Rollout Mode: $ROLLOUT_MODE"
   echo "  Max Prompt Length: $MAX_PROMPT_LENGTH"
   echo "  Max Response Length: $MAX_RESPONSE_LENGTH"
+  echo "  Rollout TP: $ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE"
+  echo "  Rollout Max Num Seqs: ${ROLLOUT_MAX_NUM_SEQS:-default}"
+  echo "  vLLM Language Model Only: ${VLLM_LANGUAGE_MODEL_ONLY:-default}"
+  echo "  Prompt Config Path: ${PROMPT_CONFIG_PATH:-default}"
   echo ""
   echo "Evaluation Metrics:"
   echo "  Solve Threshold: $SOLVE_THRESHOLD"
@@ -393,6 +425,8 @@ setup_grading_environment() {
   echo "  Reward Manager: $REWARD_MANAGER"
   echo "  Server URL: ${REWARD_SERVER_URL:-not set}"
   echo "  Reward Function: $REWARD_FUNC_NAME"
+  echo "  Kernel Backend: ${KERNEL_BACKEND:-default}"
+  echo "  Reference Cache: ${REFERENCE_CACHE_ENABLE:-default}"
   echo "  Compilation Weight: $REWARD_WEIGHT_COMPILATION"
   echo "  Correctness Weight: $REWARD_WEIGHT_CORRECTNESS"
   echo "  Performance Weight: $REWARD_WEIGHT_PERFORMANCE"
@@ -403,8 +437,95 @@ setup_grading_environment() {
   echo "============================================"
 }
 
+print_key_parameters() {
+  echo "============================================"
+  echo "Key Eval Parameters"
+  echo "============================================"
+  echo "[paths]"
+  echo "  RUN_NAME: ${RUN_NAME:-}"
+  echo "  RUN_DIR: ${RUN_DIR:-}"
+  echo "  LOG_PATH: ${LOG_PATH:-}"
+  echo "  EVAL_DATASET: $EVAL_DATASET"
+  echo "  OUTPUT_PATH: $OUTPUT_PATH"
+  echo "  METRICS_OUTPUT_PATH: ${METRICS_OUTPUT_PATH:-}"
+  echo "  RAW_RESPONSE_PATH: ${RAW_RESPONSE_PATH:-}"
+  echo "[model]"
+  echo "  MODEL_NAME: $MODEL_NAME"
+  echo "  MODEL_PATH: $MODEL_PATH"
+  echo "  FIX_QWEN3_CHAT_TEMPLATE: $FIX_QWEN3_CHAT_TEMPLATE"
+  echo "[prompt]"
+  echo "  APPLY_CHAT_TEMPLATE: $APPLY_CHAT_TEMPLATE"
+  echo "  PROMPT_CONFIG_PATH: ${PROMPT_CONFIG_PATH:-}"
+  echo "  MULTI_TURN: $MULTI_TURN"
+  echo "  MAX_USER_TURNS: $MAX_USER_TURNS"
+  echo "  MULTI_ITERATION: $MULTI_ITERATION"
+  echo "  MAX_ITERATIONS: $MAX_ITERATIONS"
+  echo "  REMAIN_TURNS: $REMAIN_TURNS"
+  echo "  ITERATION_METHOD: $ITERATION_METHOD"
+  echo "  BEST_SELECTION_METRIC: $BEST_SELECTION_METRIC"
+  echo "[sampling]"
+  echo "  N_SAMPLES: $N_SAMPLES"
+  echo "  BATCH_SIZE: $BATCH_SIZE"
+  echo "  MAX_PROMPT_LENGTH: $MAX_PROMPT_LENGTH"
+  echo "  MAX_RESPONSE_LENGTH: $MAX_RESPONSE_LENGTH"
+  echo "  TEMPERATURE: $TEMPERATURE"
+  echo "  TOP_P: $TOP_P"
+  echo "  TOP_K: $TOP_K"
+  echo "  MIN_P: $MIN_P"
+  echo "  DO_SAMPLE: $DO_SAMPLE"
+  echo "  SOLVE_THRESHOLD: $SOLVE_THRESHOLD"
+  echo "  PASS_AT_K: $PASS_AT_K"
+  echo "[rollout]"
+  echo "  ROLLOUT_MODE: $ROLLOUT_MODE"
+  echo "  BACKEND: $BACKEND"
+  echo "  ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE: $ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE"
+  echo "  ROLLOUT_GPU_MEMORY_UTIL: $ROLLOUT_GPU_MEMORY_UTIL"
+  echo "  ROLLOUT_MAX_NUM_SEQS: ${ROLLOUT_MAX_NUM_SEQS:-}"
+  echo "  ROLLOUT_DISABLE_LOG_STATS: ${ROLLOUT_DISABLE_LOG_STATS:-}"
+  echo "  ROLLOUT_MAX_MODEL_LEN: ${ROLLOUT_MAX_MODEL_LEN:-}"
+  echo "  MAX_NUM_BATCHED_TOKENS: $MAX_NUM_BATCHED_TOKENS"
+  echo "  VLLM_LANGUAGE_MODEL_ONLY: ${VLLM_LANGUAGE_MODEL_ONLY:-}"
+  echo "  NNODES: $NNODES"
+  echo "  N_GPUS_PER_NODE: $N_GPUS_PER_NODE"
+  echo "[reward]"
+  echo "  REWARD_SERVER_URL: ${REWARD_SERVER_URL:-}"
+  echo "  REWARD_MANAGER: $REWARD_MANAGER"
+  echo "  REWARD_FUNC_NAME: $REWARD_FUNC_NAME"
+  echo "  REFERENCE_BACKEND: $REFERENCE_BACKEND"
+  echo "  KERNEL_BACKEND: ${KERNEL_BACKEND:-}"
+  echo "  DETECT_DECOY_KERNEL: ${DETECT_DECOY_KERNEL:-config_default}"
+  echo "  COVERAGE_REWARD_TYPE: ${COVERAGE_REWARD_TYPE:-config_default}"
+  echo "  COVERAGE_REWARD_ENABLE: ${COVERAGE_REWARD_ENABLE:-config_default}"
+  echo "  COVERAGE_REWARD_WEIGHT: ${COVERAGE_REWARD_WEIGHT:-config_default}"
+  echo "  REFERENCE_CACHE_ENABLE: ${REFERENCE_CACHE_ENABLE:-}"
+  echo "  REFERENCE_CACHE_AUTO_UUID: ${REFERENCE_CACHE_AUTO_UUID:-}"
+  echo "  REFERENCE_CACHE_FORCE_REFRESH: ${REFERENCE_CACHE_FORCE_REFRESH:-}"
+  echo "  REWARD_TASK_TIMEOUT: $REWARD_TASK_TIMEOUT"
+  echo "  REWARD_TASK_TIMEOUT_CLIENT: $REWARD_TASK_TIMEOUT_CLIENT"
+  echo "  REWARD_TIMEOUT: $REWARD_TIMEOUT"
+  echo "  REWARD_ACQUIRE_TIMEOUT: $REWARD_ACQUIRE_TIMEOUT"
+  echo "  REWARD_MAX_CONCURRENT: $REWARD_MAX_CONCURRENT"
+  echo "  REWARD_RATE_LIMIT: $REWARD_RATE_LIMIT"
+  echo "  REWARD_MAX_RETRIES: $REWARD_MAX_RETRIES"
+  echo "  NUM_CORRECT_TRIALS: $NUM_CORRECT_TRIALS"
+  echo "  NUM_WARMUP: $NUM_WARMUP"
+  echo "  NUM_PERF_TRIALS: $NUM_PERF_TRIALS"
+  echo "  PERF_TRIM_COUNT: $PERF_TRIM_COUNT"
+  echo "  SPEEDUP_REWARD_UPPER_BOUND: $SPEEDUP_REWARD_UPPER_BOUND"
+  echo "  REWARD_WEIGHTS: $REWARD_WEIGHTS"
+  echo "  REWARD_PENALTY_SCORE: $REWARD_PENALTY_SCORE"
+  echo "  REWARD_PENALTY_COMPILATION: $REWARD_PENALTY_COMPILATION"
+  echo "  REWARD_PENALTY_CORRECTNESS: $REWARD_PENALTY_CORRECTNESS"
+  echo "  REWARD_PENALTY_PERF_DEGRADE: $REWARD_PENALTY_PERF_DEGRADE"
+  echo "============================================"
+}
+
 run_grading() {
   sleep 1
+
+  if [[ -z "$MAX_NUM_BATCHED_TOKENS" ]]; then
+    MAX_NUM_BATCHED_TOKENS=$(expr "$MAX_PROMPT_LENGTH" + "$MAX_RESPONSE_LENGTH" + 1000)
+  fi
 
   # Prepare optional paths as hydra-compatible strings
   local raw_response_arg=""
@@ -422,6 +543,79 @@ run_grading() {
   if [[ -n "$METRICS_OUTPUT_PATH" ]]; then
     metrics_arg="data.metrics_output_path=$METRICS_OUTPUT_PATH"
   fi
+
+  local rollout_max_num_seqs_arg=""
+  local rollout_disable_log_stats_arg=""
+  local rollout_max_model_len_arg=""
+  local vllm_language_model_only_arg=""
+  local prompt_config_path_arg=""
+  local kernel_backend_arg=""
+  local detect_decoy_kernel_arg=""
+  local coverage_reward_type_arg=""
+  local coverage_reward_enable_arg=""
+  local coverage_reward_weight_arg=""
+  local reference_cache_enable_arg=""
+  local reference_cache_auto_uuid_arg=""
+  local reference_cache_force_refresh_arg=""
+  local trainer_logger_arg=""
+
+  if [[ -n "$ROLLOUT_MAX_NUM_SEQS" ]]; then
+    rollout_max_num_seqs_arg="actor_rollout_ref.rollout.max_num_seqs=$ROLLOUT_MAX_NUM_SEQS"
+  fi
+
+  if [[ -n "$ROLLOUT_DISABLE_LOG_STATS" ]]; then
+    rollout_disable_log_stats_arg="actor_rollout_ref.rollout.disable_log_stats=$ROLLOUT_DISABLE_LOG_STATS"
+  fi
+
+  if [[ -n "$ROLLOUT_MAX_MODEL_LEN" ]]; then
+    rollout_max_model_len_arg="actor_rollout_ref.rollout.max_model_len=$ROLLOUT_MAX_MODEL_LEN"
+  fi
+
+  if [[ -n "$VLLM_LANGUAGE_MODEL_ONLY" ]]; then
+    vllm_language_model_only_arg="+actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only=$VLLM_LANGUAGE_MODEL_ONLY"
+  fi
+
+  if [[ -n "$PROMPT_CONFIG_PATH" ]]; then
+    prompt_config_path_arg="actor_rollout_ref.rollout.multi_turn.prompt_config_path=$PROMPT_CONFIG_PATH"
+  fi
+
+  if [[ -n "$KERNEL_BACKEND" ]]; then
+    kernel_backend_arg="reward_model.kernel_backend=$KERNEL_BACKEND"
+  fi
+
+  if [[ -n "$DETECT_DECOY_KERNEL" ]]; then
+    detect_decoy_kernel_arg="reward_model.detect_decoy_kernel=$DETECT_DECOY_KERNEL"
+  fi
+
+  if [[ -n "$COVERAGE_REWARD_TYPE" ]]; then
+    coverage_reward_type_arg="reward_model.coverage_reward.reward_type=$COVERAGE_REWARD_TYPE"
+  fi
+
+  if [[ -n "$COVERAGE_REWARD_ENABLE" ]]; then
+    coverage_reward_enable_arg="reward_model.coverage_reward.enable=$COVERAGE_REWARD_ENABLE"
+  fi
+
+  if [[ -n "$COVERAGE_REWARD_WEIGHT" ]]; then
+    coverage_reward_weight_arg="reward_model.coverage_reward.weight=$COVERAGE_REWARD_WEIGHT"
+  fi
+
+  if [[ -n "$REFERENCE_CACHE_ENABLE" ]]; then
+    reference_cache_enable_arg="+reward_model.reference_cache.enable=$REFERENCE_CACHE_ENABLE"
+  fi
+
+  if [[ -n "$REFERENCE_CACHE_AUTO_UUID" ]]; then
+    reference_cache_auto_uuid_arg="+reward_model.reference_cache.auto_generate_uuid=$REFERENCE_CACHE_AUTO_UUID"
+  fi
+
+  if [[ -n "$REFERENCE_CACHE_FORCE_REFRESH" ]]; then
+    reference_cache_force_refresh_arg="+reward_model.reference_cache.force_refresh=$REFERENCE_CACHE_FORCE_REFRESH"
+  fi
+
+  if [[ -n "$TRAINER_LOGGER" ]]; then
+    trainer_logger_arg="trainer.logger=$TRAINER_LOGGER"
+  fi
+
+  print_key_parameters
 
   PYTHONUNBUFFERED=1 python -m kernel.main_grading \
       data.path=$EVAL_DATASET \
@@ -450,6 +644,11 @@ run_grading() {
       actor_rollout_ref.rollout.gpu_memory_utilization=$ROLLOUT_GPU_MEMORY_UTIL \
       actor_rollout_ref.rollout.enforce_eager=$ROLLOUT_ENFORCE_EAGER \
       actor_rollout_ref.rollout.max_num_batched_tokens=$MAX_NUM_BATCHED_TOKENS \
+      $rollout_max_num_seqs_arg \
+      $rollout_disable_log_stats_arg \
+      $rollout_max_model_len_arg \
+      $vllm_language_model_only_arg \
+      $prompt_config_path_arg \
       actor_rollout_ref.rollout.multi_turn.enable=$MULTI_TURN \
       actor_rollout_ref.rollout.multi_turn.max_user_turns=$MAX_USER_TURNS \
       actor_rollout_ref.rollout.multi_turn.multi_iteration.enable=$MULTI_ITERATION \
@@ -468,8 +667,13 @@ run_grading() {
       actor_rollout_ref.rollout.openai.max_concurrency=$OPENAI_MAX_CONCURRENCY \
       reward_model.reward_manager=$REWARD_MANAGER \
       reward_model.reference_backend=$REFERENCE_BACKEND \
+      $kernel_backend_arg \
+      $detect_decoy_kernel_arg \
       reward_model.server_url='"'$REWARD_SERVER_URL'"' \
       reward_model.reward_func_name=$REWARD_FUNC_NAME \
+      $coverage_reward_type_arg \
+      $coverage_reward_enable_arg \
+      $coverage_reward_weight_arg \
       reward_model.enhanced=$REWARD_ENHANCED \
       reward_model.use_sandbox_rate_limit=$REWARD_USE_SANDBOX_RATE_LIMIT \
       reward_model.rate_limit=$REWARD_RATE_LIMIT \
@@ -485,6 +689,9 @@ run_grading() {
       reward_model.perf_trim_count=$PERF_TRIM_COUNT \
       reward_model.num_correct_trials=$NUM_CORRECT_TRIALS \
       reward_model.speedup_reward_upper_bound=$SPEEDUP_REWARD_UPPER_BOUND \
+      $reference_cache_enable_arg \
+      $reference_cache_auto_uuid_arg \
+      $reference_cache_force_refresh_arg \
       reward_model.reward_weights.compilation=$REWARD_WEIGHT_COMPILATION \
       reward_model.reward_weights.correctness=$REWARD_WEIGHT_CORRECTNESS \
       reward_model.reward_weights.performance=$REWARD_WEIGHT_PERFORMANCE \
@@ -496,6 +703,7 @@ run_grading() {
       custom_reward_function.name=$CUSTOM_REWARD_NAME \
       trainer.project_name=$PROJECT_NAME \
       trainer.experiment_name=$EXPERIMENT_NAME \
+      $trainer_logger_arg \
       trainer.nnodes=$NNODES \
       trainer.n_gpus_per_node=$N_GPUS_PER_NODE \
       trainer.fix_qwen3_chat_template=$FIX_QWEN3_CHAT_TEMPLATE \

@@ -1493,6 +1493,11 @@ def main_task(config):
                     finish_reasons = batch.non_tensor_batch['finish_reasons']
                     sample_eval["finish_reason"] = get_seq_item(finish_reasons, i)
 
+                # Add per-turn vLLM finish reason (stop vs length vs timeout etc.)
+                if 'turn_finish_reasons' in batch.non_tensor_batch:
+                    turn_finish_reasons = batch.non_tensor_batch['turn_finish_reasons']
+                    sample_eval["turn_stop_reason"] = get_seq_item(turn_finish_reasons, i)
+
                 # Cache complete messages for this uid (only available in turn_id==0 row)
                 multiturn_messages = batch.non_tensor_batch.get('multiturn_messages', None)
                 if multiturn_messages is not None:
@@ -2457,7 +2462,7 @@ def main_task(config):
         print("=" * 80)
 
     # --- 5. SAVING RESULTS ---
-    print("Saving results to JSONL...")
+    print("Saving grading results...")
 
     # Group scores by prompt_index for solve_rate calculation
     prompt_indices = all_dataproto.non_tensor_batch['prompt_index']
@@ -2483,13 +2488,16 @@ def main_task(config):
     # filter where the solve_rate is not NaN
     dataframe = dataframe[dataframe['solve_rate'].notna()]
 
-    # Save/append the final dataset to a JSONL file
+    # Save/append the final dataset. Keep the file format consistent with the configured suffix.
     output_path = config.data.output_path
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    mode = 'a' if os.path.exists(output_path) else 'w'
-    with open(output_path, mode) as f:
-        for record in dataframe.to_dict(orient='records'):
-            f.write(json.dumps(record, default=_json_default) + '\n')
+    if str(output_path).endswith(".parquet"):
+        dataframe.to_parquet(output_path, index=False)
+    else:
+        mode = 'a' if os.path.exists(output_path) else 'w'
+        with open(output_path, mode) as f:
+            for record in dataframe.to_dict(orient='records'):
+                f.write(json.dumps(record, default=_json_default) + '\n')
 
     # Save conversations to JSONL if multi-turn
     save_conversations_to_jsonl(all_dataproto, reward_tensor, tokenizer, output_path)

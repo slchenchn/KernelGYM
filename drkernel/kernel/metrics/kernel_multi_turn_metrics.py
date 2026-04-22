@@ -70,6 +70,7 @@ def compute_kernel_multi_turn_metrics(batch: DataProto, prefix: str = "kernel") 
     # sample_indices = batch.batch.get('sample_indices', None)
     reward_extra_info = batch.non_tensor_batch['reward_extra_info']
     uids = batch.non_tensor_batch.get('uid', None)
+    turn_finish_reasons = batch.non_tensor_batch.get('turn_finish_reasons', None)
 
     # Convert tensors to numpy if needed
     if hasattr(turn_indices, 'cpu'):
@@ -94,6 +95,10 @@ def compute_kernel_multi_turn_metrics(batch: DataProto, prefix: str = "kernel") 
     print(f"uids: {uids}")
 
     total_timeout_turns = 0
+
+    # Per-turn vLLM finish reason tracking
+    per_turn_finish_reasons = defaultdict(list)  # turn_idx -> list of finish reasons
+    all_vllm_finish_reasons = []  # flat list for overall stats
 
     for row_idx in range(len(turn_indices)):
         turn_idx = int(turn_indices[row_idx])
@@ -146,6 +151,13 @@ def compute_kernel_multi_turn_metrics(batch: DataProto, prefix: str = "kernel") 
 
         has_keys_count += 1
         sample_turn_data[sample_id][turn_idx] = extra_info
+
+        # Track per-turn vLLM finish reason
+        if turn_finish_reasons is not None:
+            vllm_fr = turn_finish_reasons[row_idx]
+            if vllm_fr != "padding":
+                per_turn_finish_reasons[turn_idx].append(str(vllm_fr))
+                all_vllm_finish_reasons.append(str(vllm_fr))
 
     if not sample_turn_data:
         return {}
@@ -413,6 +425,27 @@ def compute_kernel_multi_turn_metrics(batch: DataProto, prefix: str = "kernel") 
         metrics[f'{prefix}/improvement/improved_samples'] = improvement_count
         metrics[f'{prefix}/improvement/regressed_samples'] = regression_count
         metrics[f'{prefix}/improvement/net_improvement'] = improvement_count - regression_count
+
+    # ============================================
+    # Type 4: Per-turn vLLM finish reason metrics
+    # ============================================
+    if all_vllm_finish_reasons:
+        from collections import Counter
+        overall_counts = Counter(all_vllm_finish_reasons)
+        total_vllm = len(all_vllm_finish_reasons)
+        for reason, count in overall_counts.items():
+            metrics[f'{prefix}/vllm_finish_reason/{reason}'] = count / total_vllm
+        metrics[f'{prefix}/vllm_finish_reason/length_stopped_count'] = overall_counts.get('length', 0)
+        metrics[f'{prefix}/vllm_finish_reason/length_stopped_rate'] = overall_counts.get('length', 0) / total_vllm
+
+        # Per-turn breakdown
+        for turn_idx in sorted(per_turn_finish_reasons.keys()):
+            turn_frs = per_turn_finish_reasons[turn_idx]
+            turn_counts = Counter(turn_frs)
+            turn_total = len(turn_frs)
+            for reason, count in turn_counts.items():
+                metrics[f'{prefix}/turn_{turn_idx}/vllm_finish_reason/{reason}'] = count / turn_total
+            metrics[f'{prefix}/turn_{turn_idx}/vllm_finish_reason/length_stopped_rate'] = turn_counts.get('length', 0) / turn_total
 
     return metrics
 

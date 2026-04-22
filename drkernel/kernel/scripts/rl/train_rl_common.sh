@@ -164,6 +164,8 @@ ROLLOUT_N=${ROLLOUT_N:-16}
 KL_COEF=${KL_COEF:-0.0}
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-1000}
 ROLLOUT_GPU_MEMORY_UTIL=${ROLLOUT_GPU_MEMORY_UTIL:-0.75}
+ROLLOUT_MAX_NUM_SEQS=${ROLLOUT_MAX_NUM_SEQS:-}
+ROLLOUT_DISABLE_LOG_STATS=${ROLLOUT_DISABLE_LOG_STATS:-True}
 ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-False}
 ACTOR_PARAMETER_OFFLOAD=${ACTOR_PARAMETER_OFFLOAD:-False}
 MODEL_NAME=${MODEL_NAME:-Qwen3-8B-Base}
@@ -181,7 +183,13 @@ ACTOR_USE_TORCH_COMPILE=${ACTOR_USE_TORCH_COMPILE:-""}
 REF_USE_TORCH_COMPILE=${REF_USE_TORCH_COMPILE:-""}
 SAVE_FREQ=${SAVE_FREQ:-10}
 TEST_FREQ=${TEST_FREQ:-10}
-TRAINER_LOGGERS=${TRAINER_LOGGERS:-"['console','wandb']"}
+if [[ -z "${TRAINER_LOGGERS+x}" ]]; then
+  if [[ "${WANDB_MODE:-}" == "disabled" ]]; then
+    TRAINER_LOGGERS="['console']"
+  else
+    TRAINER_LOGGERS="['console','wandb']"
+  fi
+fi
 REMOVE_CLIP=${REMOVE_CLIP:-False}
 ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE=${ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE:-1}
 FREE_CACHE_ENGINE=${FREE_CACHE_ENGINE:-True}
@@ -689,6 +697,9 @@ PY
   echo "Temperature: $TEMPERATURE"
   echo "Rollout N: $ROLLOUT_N"
   echo "Rollout Mode: $ROLLOUT_MODE"
+  if [[ -n "${ROLLOUT_MAX_NUM_SEQS:-}" ]]; then
+    echo "Rollout Max Num Seqs: $ROLLOUT_MAX_NUM_SEQS"
+  fi
   echo "KL Coefficient: $KL_COEF"
   echo "Total Epochs: $TOTAL_EPOCHS"
   echo "Model Name: $MODEL_NAME"
@@ -777,6 +788,10 @@ run_training() {
   if [[ -n "${ROLLOUT_VLLM_ALLOW_DEPRECATED_QUANTIZATION:-}" ]]; then
     rollout_vllm_extra_args+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.allow_deprecated_quantization=$ROLLOUT_VLLM_ALLOW_DEPRECATED_QUANTIZATION")
   fi
+  reward_server_url_arg=()
+  if [[ -n "$REWARD_SERVER_URL" ]]; then
+    reward_server_url_arg=("reward_model.server_url=\"${REWARD_SERVER_URL}\"")
+  fi
 
   PYTHONUNBUFFERED=1 python -m kernel.main_kernel --config-name "$HYDRA_CONFIG_NAME" \
       trainer.val_before_train=$VAL_BEFORE_TRAIN \
@@ -846,6 +861,7 @@ run_training() {
       actor_rollout_ref.rollout.name=vllm \
       actor_rollout_ref.rollout.mode=$ROLLOUT_MODE \
       actor_rollout_ref.rollout.gpu_memory_utilization=$ROLLOUT_GPU_MEMORY_UTIL \
+      actor_rollout_ref.rollout.disable_log_stats=$ROLLOUT_DISABLE_LOG_STATS \
       actor_rollout_ref.rollout.n=$ROLLOUT_N \
       actor_rollout_ref.rollout.val_kwargs.n=$N_VAL \
       actor_rollout_ref.rollout.val_kwargs.do_sample=$VAL_DO_SAMPLE \
@@ -853,6 +869,7 @@ run_training() {
       actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
       actor_rollout_ref.rollout.val_kwargs.max_user_turns=$VAL_MAX_TURN \
       actor_rollout_ref.rollout.max_num_batched_tokens=$max_num_batched_tokens \
+      ${ROLLOUT_MAX_NUM_SEQS:+actor_rollout_ref.rollout.max_num_seqs=$ROLLOUT_MAX_NUM_SEQS} \
       actor_rollout_ref.rollout.calculate_log_probs=$CALCULATE_LOG_PROBS \
       "${rollout_vllm_extra_args[@]}" \
       actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=$LOG_PROB_MICRO_TOKEN \
@@ -869,7 +886,7 @@ run_training() {
       reward_model.reward_manager=$REWARD_MANAGER \
       reward_model.enhanced=$REWARD_ENHANCED \
       reward_model.use_sandbox_rate_limit=$REWARD_USE_SANDBOX_RATE_LIMIT \
-      reward_model.server_url='"'$REWARD_SERVER_URL'"' \
+      "${reward_server_url_arg[@]}" \
       reward_model.rate_limit=$REWARD_RATE_LIMIT \
       reward_model.acquire_timeout=$REWARD_ACQUIRE_TIMEOUT \
       reward_model.max_concurrent=$REWARD_MAX_CONCURRENT \
@@ -917,6 +934,8 @@ run_training() {
       ${RAY_ADDRESS:++ray_kwargs.ray_init.address=$RAY_ADDRESS} \
       ${PYTHONPATH:++ray_kwargs.ray_init.runtime_env.env_vars.PYTHONPATH=$PYTHONPATH} \
       ${VLLM_USE_V1:++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_USE_V1=$VLLM_USE_V1} \
+      ${VLLM_LOGGING_LEVEL:++ray_kwargs.ray_init.runtime_env.env_vars.VLLM_LOGGING_LEVEL=$VLLM_LOGGING_LEVEL} \
+      ${KERNELGYM_VLLM_STATS_LOG_INTERVAL:++ray_kwargs.ray_init.runtime_env.env_vars.KERNELGYM_VLLM_STATS_LOG_INTERVAL=$KERNELGYM_VLLM_STATS_LOG_INTERVAL} \
       ${GLOO_SOCKET_IFNAME:++ray_kwargs.ray_init.runtime_env.env_vars.GLOO_SOCKET_IFNAME=$GLOO_SOCKET_IFNAME} \
       ${NCCL_SOCKET_IFNAME:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SOCKET_IFNAME=$NCCL_SOCKET_IFNAME} \
       ${NCCL_NET:++ray_kwargs.ray_init.runtime_env.env_vars.NCCL_NET=$NCCL_NET} \

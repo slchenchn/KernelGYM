@@ -146,6 +146,20 @@ class KernelBenchToolkit(Toolkit):
                 detect_decoy_kernel=detect_decoy_kernel,
                 backend_adapter=backend_adapter,
             )
+            if result is None:
+                return EvaluationResult(
+                    task_id=task.task_id,
+                    compiled=False,
+                    correctness=False,
+                    decoy_kernel=False,
+                    reference_runtime=0.0,
+                    kernel_runtime=0.0,
+                    speedup=0.0,
+                    metadata={"error": "eval_kernel_against_ref returned None"},
+                    status="failed",
+                    error_message="Kernel evaluation failed: empty evaluation result",
+                    error_code=ErrorCode.RUNTIME_ERROR,
+                )
 
             if not run_correctness:
                 if result.metadata is None:
@@ -337,6 +351,19 @@ class KernelBenchToolkit(Toolkit):
                 detect_decoy_kernel=detect_decoy_kernel,
                 backend_adapter=backend_adapter,
             )
+            if result is None:
+                return KernelEvaluationResult(
+                    task_id=task.task_id,
+                    base_task_id=task.base_task_id,
+                    compiled=False,
+                    correctness=False,
+                    decoy_kernel=False,
+                    kernel_runtime=0.0,
+                    metadata={"error": "eval_kernel_against_ref returned None"},
+                    status="failed",
+                    error_message="Kernel evaluation failed: empty evaluation result",
+                    error_code=ErrorCode.RUNTIME_ERROR,
+                )
 
             if not run_correctness:
                 if result.metadata is None:

@@ -90,9 +90,78 @@ public:
 """
 
     @staticmethod
-    def _parse_embedded_sources(code: str) -> tuple[dict[str, str], str]:
-        import re
+    def _strip_think_blocks(code: str) -> str:
+        code = code or ""
+        think_end_matches = list(re.finditer(r"</think\s*>", code, flags=re.IGNORECASE))
+        if think_end_matches:
+            return code[think_end_matches[-1].end() :]
+        return re.sub(r"<think\b[^>]*>.*?</think>", "", code, flags=re.DOTALL | re.IGNORECASE)
 
+    @staticmethod
+    def _section_pattern(section_name: str, language: str) -> re.Pattern[str]:
+        if language == "python":
+            language_pattern = r"(?:python|py)"
+        else:
+            language_pattern = r"(?:cpp|c\+\+|cxx|cuda|cu)?"
+        return re.compile(
+            rf"###\s*{section_name}\s*```{language_pattern}\s*\n(.*?)```",
+            re.DOTALL | re.IGNORECASE,
+        )
+
+    @classmethod
+    def _extract_cuda_sections(cls, code: str, *, require_complete: bool = False) -> dict[str, str]:
+        code = cls._strip_think_blocks(code)
+        section_order = (
+            ("CUDA_KERNELS", "cpp"),
+            ("APPLY_BINDINGS", "cpp"),
+            ("MODEL_NEW", "python"),
+        )
+        matches = {
+            name: list(cls._section_pattern(name, language).finditer(code))
+            for name, language in section_order
+        }
+
+        best_group: dict[str, str] = {}
+        for cuda_match in matches["CUDA_KERNELS"]:
+            binding_match = next(
+                (
+                    match
+                    for match in matches["APPLY_BINDINGS"]
+                    if match.start() > cuda_match.end()
+                ),
+                None,
+            )
+            if binding_match is None:
+                continue
+            model_match = next(
+                (
+                    match
+                    for match in matches["MODEL_NEW"]
+                    if match.start() > binding_match.end()
+                ),
+                None,
+            )
+            if model_match is None:
+                continue
+            best_group = {
+                "CUDA_KERNELS": cuda_match.group(1).strip(),
+                "APPLY_BINDINGS": binding_match.group(1).strip(),
+                "MODEL_NEW": model_match.group(1).strip(),
+            }
+        if best_group:
+            return best_group
+        if require_complete:
+            return {}
+
+        sections: dict[str, str] = {}
+        for name, language in section_order:
+            section_matches = matches[name]
+            if section_matches:
+                sections[name] = section_matches[-1].group(1).strip()
+        return sections
+
+    @staticmethod
+    def _parse_embedded_sources(code: str) -> tuple[dict[str, str], str]:
         legacy_match = re.search(
             r"###\s*CUDA_SOURCES\s*###\s*(.*?)###\s*END_CUDA_SOURCES\s*###",
             code,
@@ -107,36 +176,22 @@ public:
             python_code = f"{code[:legacy_match.start()]}{code[legacy_match.end():]}".strip()
             return normalized, python_code
 
-        section_patterns = {
-            "CUDA_KERNELS": re.compile(
-                r"###\s*CUDA_KERNELS\s*```(?:cpp|c\+\+)?\s*\n(.*?)```",
-                re.DOTALL | re.IGNORECASE,
-            ),
-            "APPLY_BINDINGS": re.compile(
-                r"###\s*APPLY_BINDINGS\s*```(?:cpp|c\+\+)?\s*\n(.*?)```",
-                re.DOTALL | re.IGNORECASE,
-            ),
-            "MODEL_NEW": re.compile(
-                r"###\s*MODEL_NEW\s*```python\s*\n(.*?)```",
-                re.DOTALL | re.IGNORECASE,
-            ),
-        }
-        section_matches = {
-            name: pattern.search(code) for name, pattern in section_patterns.items()
-        }
-        if not any(section_matches.values()):
-            return {}, code.strip()
+        code_without_think = KernelBenchCudaAgentBackend._strip_think_blocks(code)
+        sections = KernelBenchCudaAgentBackend._extract_cuda_sections(
+            code_without_think,
+            require_complete=True,
+        )
+        if not sections:
+            sections = KernelBenchCudaAgentBackend._extract_cuda_sections(code_without_think)
+        if not sections:
+            return {}, code_without_think.strip()
 
         cuda_sources: dict[str, str] = {}
-        if section_matches["CUDA_KERNELS"] is not None:
-            cuda_sources["kernels/generated.cu"] = section_matches["CUDA_KERNELS"].group(1).strip()
-        if section_matches["APPLY_BINDINGS"] is not None:
-            cuda_sources["kernels/generated_binding.cpp"] = section_matches["APPLY_BINDINGS"].group(1).strip()
-        python_code = (
-            section_matches["MODEL_NEW"].group(1).strip()
-            if section_matches["MODEL_NEW"] is not None
-            else ""
-        )
+        if sections.get("CUDA_KERNELS"):
+            cuda_sources["kernels/generated.cu"] = sections["CUDA_KERNELS"]
+        if sections.get("APPLY_BINDINGS"):
+            cuda_sources["kernels/generated_binding.cpp"] = sections["APPLY_BINDINGS"]
+        python_code = sections.get("MODEL_NEW", "")
         return cuda_sources, python_code
 
     @staticmethod
@@ -146,6 +201,44 @@ public:
         if not isinstance(cuda_sources, dict):
             raise TypeError("cuda_sources must be a dict[str, str]")
         return {str(name): str(content) for name, content in cuda_sources.items()}
+
+    @staticmethod
+    def _decode_mountinfo_path(path: str) -> str:
+        return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), path)
+
+    @staticmethod
+    def _mountinfo_path_has_noexec(path: Path, mountinfo_text: str) -> bool:
+        try:
+            resolved_path = path.resolve(strict=False)
+        except OSError:
+            resolved_path = path.absolute()
+
+        best_mount_len = -1
+        best_options: set[str] = set()
+        for line in mountinfo_text.splitlines():
+            fields = line.split()
+            if len(fields) < 6:
+                continue
+            mount_point = Path(KernelBenchCudaAgentBackend._decode_mountinfo_path(fields[4]))
+            try:
+                resolved_mount = mount_point.resolve(strict=False)
+            except OSError:
+                resolved_mount = mount_point.absolute()
+            if resolved_path != resolved_mount and resolved_mount not in resolved_path.parents:
+                continue
+            mount_len = len(str(resolved_mount))
+            if mount_len > best_mount_len:
+                best_mount_len = mount_len
+                best_options = set(fields[5].split(","))
+        return "noexec" in best_options
+
+    @staticmethod
+    def _path_has_noexec_mount(path: Path) -> bool:
+        try:
+            mountinfo_text = Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return KernelBenchCudaAgentBackend._mountinfo_path_has_noexec(path, mountinfo_text)
 
     @staticmethod
     def _select_work_dir_parent() -> str | None:
@@ -159,6 +252,8 @@ public:
             path = Path(candidate)
             try:
                 if not path.is_dir() or not os.access(path, os.W_OK | os.X_OK):
+                    continue
+                if KernelBenchCudaAgentBackend._path_has_noexec_mount(path):
                     continue
                 if shutil.disk_usage(path).free < _CUDA_AGENT_MIN_TMPDIR_FREE_BYTES:
                     continue

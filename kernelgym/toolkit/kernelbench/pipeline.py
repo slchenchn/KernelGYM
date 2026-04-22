@@ -565,8 +565,10 @@ def eval_kernel_against_ref(
                     print(
                         f"[Eval] Lock file error during compilation, Please retry. Error: {error}"
                     )
+                    metadata["compilation_error_name"] = "compile_error"
+                    metadata["compilation_error"] = error
                     _cleanup()
-                    return None
+                    return KernelExecResult(compiled=False, correctness=False, metadata=metadata)
                 metadata["compilation_error_name"] = "compile_error"
                 metadata["compilation_error"] = error
                 _cleanup()
@@ -602,8 +604,10 @@ def eval_kernel_against_ref(
             print(
                 f"[Eval] Lock file error during compilation, Please retry. Error: {e}"
             )
+            metadata["compilation_error_name"] = get_error_name(e)
+            metadata["compilation_error"] = e
             _cleanup()
-            return None
+            return KernelExecResult(compiled=False, correctness=False, metadata=metadata)
         metadata["compilation_error_name"] = get_error_name(e)
         metadata["compilation_error"] = e
         _cleanup()

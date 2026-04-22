@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import random
 import re
+from collections.abc import Iterable as IterableABC
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -13,6 +14,7 @@ from typing import Iterable
 import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
+from jinja2 import Environment
 
 
 ARCHITECTURE_BLOCK_PATTERNS = (
@@ -27,6 +29,7 @@ ARCHITECTURE_BLOCK_PATTERNS = (
         re.IGNORECASE | re.DOTALL,
     ),
 )
+_JINJA_ENV = Environment(keep_trailing_newline=True)
 
 
 @dataclass(frozen=True)
@@ -98,33 +101,122 @@ def write_backend_neutral_text(text_output_path: Path, neutral_prompts: Iterable
             output_file.write(format_prompt_row_for_text(row_index, messages))
 
 
-def load_per_turn_prompt_template(prompt_config_path: Path, name: str) -> str | None:
+def _prompt_template_candidates(prompt_template: object) -> list[str]:
+    if prompt_template is None:
+        return []
+    if isinstance(prompt_template, str):
+        return [prompt_template]
+    if isinstance(prompt_template, IterableABC):
+        return [str(candidate) for candidate in prompt_template if candidate is not None]
+    return [str(prompt_template)]
+
+
+def _read_prompt_template_path(template_path: object, base_dir: Path) -> str:
+    path = Path(str(template_path)).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return path.read_text(encoding="utf-8")
+
+
+def _read_prompt_template_dir(template_dir: object, base_dir: Path) -> list[str]:
+    path = Path(str(template_dir)).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    if not path.is_dir():
+        raise ValueError(f"prompt template dir does not exist: {path}")
+    template_paths = sorted(
+        candidate
+        for candidate in path.iterdir()
+        if candidate.is_file() and candidate.suffix in {".jinja", ".j2", ".txt", ".md"}
+    )
+    if not template_paths:
+        raise ValueError(f"prompt template dir contains no template files: {path}")
+    return [template_path.read_text(encoding="utf-8") for template_path in template_paths]
+
+
+def _prompt_template_from_config(per_turn_prompt: dict[str, object], base_dir: Path) -> str | list[str] | None:
+    template_dirs = per_turn_prompt.get("template_dirs")
+    if template_dirs is not None:
+        templates: list[str] = []
+        for template_dir in _prompt_template_candidates(template_dirs):
+            templates.extend(_read_prompt_template_dir(template_dir, base_dir))
+        return templates or None
+
+    template_dir = per_turn_prompt.get("template_dir")
+    if template_dir is not None:
+        return _read_prompt_template_dir(template_dir, base_dir)
+
+    template_paths = per_turn_prompt.get("template_paths")
+    if template_paths is not None:
+        return [
+            _read_prompt_template_path(template_path, base_dir)
+            for template_path in _prompt_template_candidates(template_paths)
+        ]
+
+    template_path = per_turn_prompt.get("template_path")
+    if template_path is not None:
+        return _read_prompt_template_path(template_path, base_dir)
+
+    templates = per_turn_prompt.get("templates")
+    if templates is not None:
+        candidates = _prompt_template_candidates(templates)
+        return candidates or None
+
+    return per_turn_prompt.get("template")  # type: ignore[return-value]
+
+
+def load_per_turn_prompt_template(prompt_config_path: Path, name: str) -> str | list[str] | None:
     prompt_config = yaml.safe_load(prompt_config_path.read_text(encoding="utf-8"))
     for per_turn_prompt in prompt_config.get("per_turn_prompts", []):
         if per_turn_prompt.get("name") == name:
-            return per_turn_prompt.get("template")
+            return _prompt_template_from_config(per_turn_prompt, prompt_config_path.parent)
     raise ValueError(f"prompt template {name!r} not found in {prompt_config_path}")
+
+
+def _render_prompt_template(template: str, **variables: str) -> str:
+    return _JINJA_ENV.from_string(template).render(**variables)
+
+
+def _template_has_problem_placeholder(template: str) -> bool:
+    return re.search(r"{{\s*problem\s*}}", template) is not None
+
+
+def _select_prompt_template(prompt_template: str | list[str] | None, rng: random.Random | None = None) -> str | None:
+    candidates = _prompt_template_candidates(prompt_template)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    return (rng or random).choice(candidates)
 
 
 def format_prompt_messages_for_first_turn(
     messages: Iterable[dict[str, str]],
-    first_turn_template: str | None,
+    first_turn_template: str | list[str] | None,
+    *,
+    rng: random.Random | None = None,
 ) -> list[dict[str, str]]:
     formatted = [dict(message) for message in messages]
-    if first_turn_template is None:
+    selected_template = _select_prompt_template(first_turn_template, rng)
+    if selected_template is None:
         return formatted
 
     if formatted and formatted[-1].get("role") == "user":
         original_content = formatted[-1].get("content", "")
-        template = first_turn_template.rstrip()
-        if "{problem}" in template:
+        if _template_has_problem_placeholder(selected_template):
             problem = original_content.strip()
-            formatted[-1]["content"] = template.replace("{problem}", problem)
+            formatted[-1]["content"] = _render_prompt_template(selected_template, problem=problem)
         else:
+            template = selected_template.rstrip()
             problem = original_content.lstrip()
             formatted[-1]["content"] = f"{template}\n\n{problem}"
     else:
-        formatted.append({"role": "user", "content": first_turn_template.replace("{problem}", "").rstrip()})
+        formatted.append(
+            {
+                "role": "user",
+                "content": _render_prompt_template(selected_template, problem="").rstrip(),
+            }
+        )
     return formatted
 
 
@@ -166,6 +258,7 @@ def write_formatted_prompt_sample_text(
     prompts = table.column(prompt_index).to_pylist()
     sample_indices = sample_prompt_indices(len(prompts), sample_size, seed)
     first_turn_template = load_per_turn_prompt_template(prompt_config_path, "first_turn")
+    rng = random.Random(seed)
 
     sample_output_path.parent.mkdir(parents=True, exist_ok=True)
     with sample_output_path.open("w", encoding="utf-8") as output_file:
@@ -175,6 +268,7 @@ def write_formatted_prompt_sample_text(
             formatted_messages = format_prompt_messages_for_first_turn(
                 prompts[source_row_index],
                 first_turn_template,
+                rng=rng,
             )
             output_file.write(
                 format_sampled_prompt_row_for_text(

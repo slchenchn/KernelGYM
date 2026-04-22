@@ -422,7 +422,17 @@ class StandaloneVLLMEngineManager:
 
     def sleep(self, level: int = 1):
         """Sleep all vllm instances."""
-        ray.get([server.sleep.remote(level=level) for server in self.async_llm_servers])
+        try:
+            ray.get([server.sleep.remote(level=level) for server in self.async_llm_servers])
+        except Exception:
+            if os.environ.get("DRKERNEL_STANDALONE_VLLM_SLEEP_STRICT", "0") == "1":
+                raise
+            logger.exception(
+                "Standalone vLLM sleep(level=%s) failed; continuing because offline grading "
+                "does not share GPUs with actor weights. Set DRKERNEL_STANDALONE_VLLM_SLEEP_STRICT=1 "
+                "to make this fatal.",
+                level,
+            )
 
     def generate_sequences(self, prompts: DataProto, **sampling_params) -> DataProto:
         """Generate multiple sequences in parallel via chat scheduler."""

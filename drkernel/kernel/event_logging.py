@@ -124,6 +124,143 @@ def truncate_feedback_for_prompt(
     return text[:head_chars] + marker + text[-tail_chars:]
 
 
+def _dedupe_preserve_order(items: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def summarize_diagnostic_text(text: Any, limit: int = 800) -> str | None:
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        text = str(text)
+    cleaned = text.strip()
+    if not cleaned:
+        return cleaned
+
+    precheck_match = re.search(r"(Precheck failed:[^\n]+)", cleaned)
+    if precheck_match:
+        return precheck_match.group(1).strip()
+
+    syntax_match = re.search(r"(Syntax error[^\n]+)", cleaned)
+    if syntax_match:
+        return syntax_match.group(1).strip()
+
+    timeout_match = re.search(r"((?:Task|Operation)[^\n]*timeout[^\n]*)", cleaned, re.IGNORECASE)
+    if timeout_match:
+        return timeout_match.group(1).strip()
+
+    attribute_error_match = re.search(r"('[^'\n]+' object has no attribute '[^'\n]+')", cleaned)
+    if attribute_error_match:
+        return attribute_error_match.group(1).strip()
+
+    compiler_error_lines = _dedupe_preserve_order(
+        line.strip()
+        for line in cleaned.splitlines()
+        if line.strip() and (" error:" in line.lower() or line.strip().lower().startswith("error:"))
+    )
+    if compiler_error_lines:
+        return _truncate_text("\n".join(compiler_error_lines[:4]), limit)
+
+    exception_lines = _dedupe_preserve_order(
+        match.strip()
+        for match in re.findall(
+            r"([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception):[^\n]+)",
+            cleaned,
+        )
+        if match.strip()
+    )
+    if exception_lines:
+        return _truncate_text("\n".join(exception_lines[-3:]), limit)
+
+    signal_lines = _dedupe_preserve_order(
+        line.strip()
+        for line in cleaned.splitlines()
+        if line.strip() and any(
+            token in line.lower()
+            for token in ("failed", "error", "exception", "timeout")
+        )
+    )
+    if signal_lines:
+        return _truncate_text("\n".join(signal_lines[-3:]), limit)
+
+    return _truncate_text(cleaned, limit)
+
+
+def build_prompt_feedback_payload(env_state: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep only the reward signals that matter for the next model turn."""
+    state = env_state or {}
+    metadata = state.get("metadata", {}) or {}
+
+    payload: Dict[str, Any] = {}
+    for key in (
+        "task_id",
+        "status",
+        "compiled",
+        "correctness",
+        "decoy_kernel",
+        "reference_runtime",
+        "kernel_runtime",
+        "speedup",
+        "reward",
+        "success",
+        "error_code",
+    ):
+        if key in state and state.get(key) is not None:
+            payload[key] = state.get(key)
+
+    primary_error = (
+        metadata.get("compilation_error")
+        or metadata.get("runtime_error")
+        or metadata.get("correctness_issue")
+        or state.get("error_message")
+        or state.get("error")
+    )
+    summarized_error = summarize_diagnostic_text(primary_error)
+    if summarized_error:
+        payload["error_message"] = summarized_error
+
+    metrics: Dict[str, Any] = {}
+    for key in (
+        "time_coverage",
+        "num_coverage",
+        "num_custom_kernel",
+        "num_total_kernels",
+        "custom_kernel_cuda_time_in_profiling_us",
+        "total_kernel_cuda_time_in_profiling_us",
+        "total_kernel_run_time_in_profiling_us",
+        "total_kernel_run_time_in_profiling_us_cpu_cuda",
+    ):
+        value = metadata.get(key, state.get(key))
+        if value is not None:
+            metrics[key] = value
+    if metrics:
+        payload["metrics"] = metrics
+
+    prompt_metadata: Dict[str, Any] = {}
+    for key in (
+        "hardware",
+        "gpu_name",
+        "device",
+        "backend",
+        "compilation_error_name",
+        "runtime_error_name",
+    ):
+        value = metadata.get(key)
+        if value not in (None, ""):
+            prompt_metadata[key] = value
+    if prompt_metadata:
+        payload["metadata"] = prompt_metadata
+
+    return payload or state
+
+
 CODE_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<code>.*?)```", re.DOTALL)
 
 

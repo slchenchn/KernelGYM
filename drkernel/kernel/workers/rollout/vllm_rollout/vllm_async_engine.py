@@ -6,6 +6,7 @@ import pickle
 import random
 from collections import deque
 from collections.abc import AsyncGenerator
+from concurrent.futures import Future
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -44,6 +45,7 @@ from vllm.v1.executor.abstract import Executor
 
 from kernel.event_logging import (
     append_jsonl_event,
+    build_prompt_feedback_payload,
     build_env_result_record,
     build_generated_code_record,
     build_turn_token_record,
@@ -53,7 +55,18 @@ from kernel.event_logging import (
     truncate_feedback_for_prompt,
 )
 from kernel.workers.agent import BaseAgent, KernelAgent
-from kernel.workers.rollout.prompt_templates import apply_turn_prompt_template
+from kernel.workers.rollout.vllm_rollout.chat_template_utils import (
+    apply_chat_template_token_ids,
+    coerce_chat_message,
+    normalize_chat_messages,
+)
+from kernel.workers.rollout.prompt_templates import (
+    apply_initial_user_prompt_template,
+    apply_turn_prompt_template,
+    iter_prompt_template_candidates,
+    prompt_template_from_config,
+    render_prompt_template,
+)
 from kernel.workers.rollout.vllm_rollout.online_quant_utils import (
     maybe_apply_online_quantization_engine_kwargs,
 )
@@ -163,6 +176,7 @@ def _build_async_engine_args_kwargs(
         load_format="auto",
         disable_log_stats=False,
         max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=rollout_config.max_num_seqs,
         enable_chunked_prefill=rollout_config.enable_chunked_prefill,
         enable_prefix_caching=True,
         trust_remote_code=trust_remote_code,
@@ -190,6 +204,43 @@ def _format_online_quant_debug(engine_kwargs: Dict[str, Any]) -> Dict[str, Any]:
 def _verbose_vllm_debug_logging_enabled() -> bool:
     flag = os.environ.get("KERNELGYM_VLLM_ENABLE_VERBOSE_INIT_LOGS", "")
     return flag.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _vllm_stats_log_interval_seconds() -> float:
+    raw = os.environ.get("KERNELGYM_VLLM_STATS_LOG_INTERVAL", "10").strip()
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid KERNELGYM_VLLM_STATS_LOG_INTERVAL=%r; using 10 seconds",
+            raw,
+        )
+        return 10.0
+
+
+def _ensure_vllm_stats_logger(owner: Any, engine: AsyncLLM | None) -> None:
+    if engine is None or not getattr(engine, "logger_manager", None):
+        return
+
+    interval = _vllm_stats_log_interval_seconds()
+    if interval <= 0:
+        return
+
+    task = getattr(owner, "_vllm_stats_log_task", None)
+    if task is not None and not task.done():
+        return
+
+    async def _log_stats_periodically() -> None:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await engine.do_log_stats()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("vLLM stats logging failed")
+
+    owner._vllm_stats_log_task = asyncio.create_task(_log_stats_periodically())
 
 
 def _log_engine_cuda_memory(stage: str):
@@ -256,166 +307,6 @@ def _create_logfire_logger(service_name: str = "vllm-async-engine"):
 
     return None
 
-
-def _get_model_runner_workers(vllm_config, init_ray: bool = True):
-    assert vllm_config.instance_id is not None, "instance_id must be set for external ray actors."
-
-    fields = vllm_config.instance_id.split(":")
-    assert len(fields) == 4, (
-        f"instance_id: {vllm_config.instance_id} must be in the format of "
-        f"<namespace>:<wg_prefix>:<vllm_dp_size>:<vllm_dp_rank>."
-    )
-    namespace, wg_prefix, vllm_dp_size, vllm_dp_rank = fields[0], fields[1], int(fields[2]), int(fields[3])
-
-    # Make sure subprocess in same namespace as parent actor.
-    # actor name format: {name_prefix}WorkerDict_{pg_idx}:{local_rank}
-    if init_ray:
-        print("initializing ray ...")
-        runtime_environment = {
-            "env_vars": {"VLLM_USE_V1": "1", "FLASH_ATTENTION_DETERMINISTIC": "1", "VERL_AUTO_PADDING": "1"}
-        }
-        ray.init(namespace=namespace, runtime_env=runtime_environment, address='auto')
-    actor_names = [
-        actor_name for actor_name in ray.util.list_named_actors() if actor_name.startswith(f"{wg_prefix}WorkerDict")
-    ]
-
-    vllm_tp_size = vllm_config.parallel_config.tensor_parallel_size
-    assert len(actor_names) == vllm_dp_size * vllm_tp_size, (
-        f"instance_id: {vllm_config.instance_id} has {len(actor_names)} actors, but vllm_dp_size: "
-        f"{vllm_dp_size} * vllm_tp_size: {vllm_tp_size} = {vllm_dp_size * vllm_tp_size} is expected."
-    )
-
-    def get_pg_index_and_local_rank(actor_name) -> Tuple[int, int]:
-        fields = actor_name.split(":")
-        assert len(fields) == 2, f"invalid actor name: {actor_name}"
-        pg_index, local_rank = int(fields[0].split("_")[-1]), int(fields[1])
-        return pg_index, local_rank
-
-    # sort actor names by pg_index and local_rank
-    actor_names = sorted(actor_names, key=get_pg_index_and_local_rank)
-    actor_names = actor_names[vllm_dp_rank * vllm_tp_size : (vllm_dp_rank + 1) * vllm_tp_size]
-    workers: List[WorkerWrapperBase] = [ray.get_actor(actor_name) for actor_name in actor_names]
-    print(f"instance_id: {vllm_config.instance_id} initializes with external actors: {actor_names}")
-
-    return workers
-
-
-class ExternalRayDistributedExecutor(Executor):
-    """An executor that engines are launched by external ray actors."""
-
-    uses_ray: bool = False
-
-    def _init_executor(self) -> None:
-        assert self.vllm_config.instance_id is not None, "instance_id must be set for external ray actors."
-        self.workers = _get_model_runner_workers(vllm_config=self.vllm_config, init_ray=True)
-
-        kwargs = dict(
-            vllm_config=self.vllm_config,
-            local_rank=None,
-            rank=None,
-            distributed_init_method="env://",
-            is_driver_worker=True,
-        )
-        self.collective_rpc("init_worker", args=([kwargs],))
-        self.collective_rpc("init_device")
-        self.collective_rpc("load_model")
-        print(f"instance_id: {self.vllm_config.instance_id} intializes finished.")
-
-    def collective_rpc(
-        self,
-        method: Union[str, Callable],
-        timeout: Optional[float] = None,
-        args: Tuple = (),
-        kwargs: Optional[Dict[str, Any]] = None,
-        non_block: bool = False,
-    ) -> List[Any]:
-        # TODO(wuxibin): support ray compiled graph
-        if isinstance(method, str):
-            sent_method = method
-        else:
-            sent_method = cloudpickle.dumps(method)
-
-        del method
-
-        ray_worker_outputs = [
-            worker.execute_method.remote(sent_method, *args, **(kwargs or {}))
-            for worker in self.workers
-        ]
-        if non_block:
-            from vllm.v1.executor.ray_utils import FutureWrapper
-
-            return [FutureWrapper(worker_output) for worker_output in ray_worker_outputs]
-
-        outputs = ray.get(ray_worker_outputs, timeout=timeout)
-        return outputs
-
-    def check_health(self):
-        return
-
-
-class ExternalZeroMQDistributedExecutor(Executor):
-    """An executor that engines are launched by external ray actors."""
-
-    uses_ray: bool = False
-
-    def _init_executor(self) -> None:
-        addresses = os.environ["VERL_VLLM_ZMQ_ADDRESSES"].split(",")
-        self.context = zmq.Context()
-        self.sockets = []
-        for address in addresses:
-            socket = self.context.socket(zmq.REQ)
-            socket.connect(address)
-            self.sockets.append(socket)
-
-        kwargs = dict(
-            vllm_config=self.vllm_config,
-            local_rank=None,
-            rank=None,
-            distributed_init_method="env://",
-            is_driver_worker=True,
-        )
-        self.collective_rpc("init_worker", args=([kwargs],))
-        self.collective_rpc("init_device")
-        self.collective_rpc("load_model")
-
-    def collective_rpc(
-        self,
-        method: Union[str, Callable],
-        timeout: Optional[float] = None,
-        args: Tuple = (),
-        kwargs: Optional[Dict[str, Any]] = None,
-    ) -> List[Any]:
-        if isinstance(method, str):
-            sent_method = method
-        else:
-            sent_method = pickle.dumps(method)
-        del method
-
-        message = pickle.dumps((sent_method, args, kwargs or {}))
-        for socket in self.sockets:
-            socket.send(message, zmq.DONTWAIT)
-
-        outputs = []
-        for socket in self.sockets:
-            outputs.append(pickle.loads(socket.recv()))
-        return outputs
-
-    def check_health(self):
-        return
-
-
-class AgentLoopOutput(BaseModel):
-    """Agent loop output."""
-
-    prompt_ids: list[int]
-    response_ids: list[int]
-    response_mask: list[int]
-    logprobs: list[float]
-    num_turns: int = 0
-    reward: float = None
-    reward_extra_info: dict = None
-
-
 def infer_entry_point(ground_truth: str, default: str = "Model") -> str:
     if not ground_truth:
         return default
@@ -468,6 +359,25 @@ def _get_model_runner_workers(vllm_config, init_ray: bool = True):
     return workers
 
 
+_COMPLETED_NONE_FUTURE: Future[Any] = Future()
+_COMPLETED_NONE_FUTURE.set_result(None)
+
+
+class _RayWorkerResultFuture(Future):
+    """Wait for all external TP workers, then expose the driver-rank result."""
+
+    def __init__(self, ray_refs: list[Any], *, return_first: bool):
+        super().__init__()
+        self._ray_refs = ray_refs
+        self._return_first = return_first
+
+    def result(self, timeout: float | None = None) -> Any:
+        outputs = ray.get(self._ray_refs, timeout=timeout)
+        if self._return_first:
+            return outputs[0] if outputs else None
+        return outputs
+
+
 class ExternalRayDistributedExecutor(Executor):
     """An executor that engines are launched by external ray actors."""
 
@@ -487,7 +397,56 @@ class ExternalRayDistributedExecutor(Executor):
         self.collective_rpc("init_worker", args=([kwargs],))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
+        self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
+            self.vllm_config.ec_transfer_config is None
+            or self.vllm_config.ec_transfer_config.is_ec_consumer
+        )
+        self.scheduler_output = None
         print(f"instance_id: {self.vllm_config.instance_id} intializes finished.")
+
+    def execute_model(self, scheduler_output: Any, non_block: bool = False) -> Any:
+        if self.scheduler_output is not None:
+            raise RuntimeError(
+                "State error: sample_tokens() must be called "
+                "after execute_model() returns None."
+            )
+
+        if not self.uses_sampler or not scheduler_output.total_num_scheduled_tokens:
+            return self._execute_model_ray(scheduler_output, None, non_block=non_block)
+
+        self.scheduler_output = scheduler_output
+        return _COMPLETED_NONE_FUTURE if non_block else None
+
+    def sample_tokens(self, grammar_output: Any | None, non_block: bool = False) -> Any:
+        scheduler_output = self.scheduler_output
+        if scheduler_output is None:
+            return _COMPLETED_NONE_FUTURE if non_block else None
+
+        self.scheduler_output = None
+        return self._execute_model_ray(scheduler_output, grammar_output, non_block=non_block)
+
+    def _execute_model_ray(self, scheduler_output: Any, grammar_output: Any | None, *, non_block: bool) -> Any:
+        refs = self._submit_to_workers("execute_model_ray", args=((scheduler_output, grammar_output),))
+        if non_block:
+            return _RayWorkerResultFuture(refs, return_first=True)
+        outputs = ray.get(refs)
+        return outputs[0] if outputs else None
+
+    def _submit_to_workers(
+        self,
+        method: Union[str, Callable],
+        args: Tuple = (),
+        kwargs: Optional[Dict[str, Any]] = None,
+    ) -> list[Any]:
+        if isinstance(method, str):
+            sent_method = method
+        else:
+            sent_method = cloudpickle.dumps(method)
+
+        return [
+            worker.execute_method.remote(sent_method, *args, **(kwargs or {}))
+            for worker in self.workers
+        ]
 
     def collective_rpc(
         self,
@@ -498,21 +457,9 @@ class ExternalRayDistributedExecutor(Executor):
         non_block: bool = False,
     ) -> List[Any]:
         # TODO(wuxibin): support ray compiled graph
-        if isinstance(method, str):
-            sent_method = method
-        else:
-            sent_method = cloudpickle.dumps(method)
-
-        del method
-
-        ray_worker_outputs = [
-            worker.execute_method.remote(sent_method, *args, **(kwargs or {}))
-            for worker in self.workers
-        ]
+        ray_worker_outputs = self._submit_to_workers(method, args=args, kwargs=kwargs)
         if non_block:
-            from vllm.v1.executor.ray_utils import FutureWrapper
-
-            return [FutureWrapper(worker_output) for worker_output in ray_worker_outputs]
+            return _RayWorkerResultFuture(ray_worker_outputs, return_first=False)
 
         outputs = ray.get(ray_worker_outputs, timeout=timeout)
         return outputs
@@ -620,6 +567,7 @@ class AsyncvLLMEngine:
         self.wg_prefix = wg_prefix
         self.tokenizer = tokenizer
         self.engine: AsyncLLM = None
+        self._vllm_stats_log_task = None
         self.pad_token_id = self.tokenizer.pad_token_id
         
         self.ref_reward_fn = reward_fn
@@ -724,12 +672,19 @@ class AsyncvLLMEngine:
     ) -> DataProto:
         loop = asyncio.get_running_loop()
         request_id = uuid4().hex
+        messages = normalize_chat_messages(messages)
         prompt_ids = await loop.run_in_executor(
-            None, lambda: self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+            None,
+            lambda: apply_chat_template_token_ids(
+                self.tokenizer,
+                messages,
+                add_generation_prompt=True,
+            ),
         )
         max_tokens = self.max_model_len - len(prompt_ids)
         sampling_params = SamplingParams(max_tokens=max_tokens, **sampling_params)
         prompt = TokensPrompt(prompt_token_ids=tokens)
+        _ensure_vllm_stats_logger(self, self.engine)
 
         outputs = self.engine.generate(
             prompt=prompt,  # because we have already convert it to prompt token id
@@ -853,8 +808,7 @@ class AsyncvLLMEngine:
 
         tasks = []
         for messages, tokens, ground_truth, entry_point, uuid in zip(raw_prompts, tokens_ids, ground_truths, entry_points, uuids):
-            if not isinstance(messages, list):
-                messages = messages.tolist()
+            messages = normalize_chat_messages(messages)
             if isinstance(tokens, np.ndarray):
                 tokens = tokens.tolist()
             elif hasattr(tokens, "tolist"):
@@ -1017,7 +971,7 @@ class MultiTurnStats(BaseModel):
 class MultiTurnRequest(BaseModel):
     """Agent request for multi-turn interactions."""
 
-    messages: list[dict[str, str]]
+    messages: list[dict[str, Any]]
     # store the response token id corresponding to each turn
     response_token_ids: list[list[int]]
     # how many messages are used as the prefix for this response
@@ -1027,7 +981,7 @@ class MultiTurnRequest(BaseModel):
     # Configuration for masking void turns
     mask_void_turn: bool = True
     # Extra information from dataset
-    history_messages: list[dict[str, str]] = None
+    history_messages: list[dict[str, Any]] = None
     # store all history messages. Some of them might have been removed from messages
     extra_info: dict = Field(default_factory=dict)
     # Ground truth from dataset
@@ -1041,7 +995,12 @@ class MultiTurnRequest(BaseModel):
     global_turn_offset: int = 0
     preserved_turn_indices: List[int] = Field(default_factory=list)
 
-    def add_message(self, message: str, is_tool_call: bool = False, response_token_ids: List[int] = None):
+    def add_message(
+        self,
+        message: Any,
+        is_tool_call: bool = False,
+        response_token_ids: List[int] = None,
+    ):
         """Add a message to the conversation history."""
         role = "assistant" if not is_tool_call else "user"
         # For assistant messages, store the index BEFORE adding the message
@@ -1055,9 +1014,9 @@ class MultiTurnRequest(BaseModel):
             assert False, "response_token_ids must be provided for assistant messages"
 
         # Add message after storing the index
-        self.messages.append({"role": role, "content": message})
+        self.messages.append(coerce_chat_message(message, role=role))
 
-    def _replace_message(self, turn_idx: int, messages: list[dict[str, str]]):
+    def _replace_message(self, turn_idx: int, messages: list[dict[str, Any]]):
         """
         Replace a complete-turn message in the conversation history.
         It should be assistant message and its follow-up user-turn feedback.
@@ -1177,6 +1136,7 @@ class MultiTurnAsyncvLLMEngine:
         self.wg_prefix = wg_prefix
         self.tokenizer = tokenizer
         self.engine = None
+        self._vllm_stats_log_task = None
         self.pad_token_id = tokenizer.pad_token_id
 
         self.reward_fn = reward_fn
@@ -1257,16 +1217,17 @@ class MultiTurnAsyncvLLMEngine:
                 "skip_env": prompt_config.skip_env,
                 "response_truncation": prompt_config.get("response_truncation", None),
                 "update_memory": prompt_config.get("update_memory", False),
-                "template": prompt_config.template,
+                "template": prompt_template_from_config(prompt_config, base_dir=Path(prompt_config_path).parent),
             }
 
         return per_turn_prompts
 
     def _stdout_filtered_logging_messages(self, logging_messages: list[str]) -> list[str]:
         prompt_templates = {
-            prompt_config["template"].strip()
+            candidate.strip()
             for prompt_config in (self.per_turn_prompts or {}).values()
-            if prompt_config.get("template")
+            for candidate in iter_prompt_template_candidates(prompt_config.get("template"))
+            if candidate
         }
 
         filtered_messages = []
@@ -1689,14 +1650,26 @@ class MultiTurnAsyncvLLMEngine:
                         messages = req.messages
                 else:
                     raise ValueError(f"Invalid history mode: {history_mode}")
+                messages = normalize_chat_messages(messages)
+                if current_turn > 0:
+                    first_turn_config = self.per_turn_prompts.get("first_turn", {})
+                    apply_initial_user_prompt_template(
+                        messages,
+                        first_turn_config.get("template"),
+                    )
                 apply_turn_prompt_template(
                     messages,
                     prompt_template,
                     current_turn=current_turn,
                     tool_as_user=tool_as_user,
                 )
-        
-        prompt_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+
+        messages = normalize_chat_messages(messages)
+        prompt_ids = apply_chat_template_token_ids(
+            self.tokenizer,
+            messages,
+            add_generation_prompt=True,
+        )
 
         # Prepare parameters
         # Respect both model length limit and configured response length
@@ -1727,6 +1700,7 @@ class MultiTurnAsyncvLLMEngine:
 
         # Add a timer here
         agent_start_time = asyncio.get_event_loop().time()
+        _ensure_vllm_stats_logger(self, self.engine)
 
         # Qian: sometimes async will be very slow, we add a timeout here
         async_timeout = self._compute_adaptive_timeout(max_tokens=max_tokens, is_validate=is_validate)
@@ -1898,11 +1872,12 @@ class MultiTurnAsyncvLLMEngine:
         #TODO: weiliu: change the env results and change returns of kernel clients
         # tool_response, env_done, truncate, turn_reward, tool_info = env_result
         env_state = env_result["env_state"]
+        feedback_payload = build_prompt_feedback_payload(env_state)
 
         try:
-            tool_response_json = json.dumps(env_state, ensure_ascii=False, indent=2)
+            tool_response_json = json.dumps(feedback_payload, ensure_ascii=False, indent=2)
         except Exception:
-            tool_response_json = str(env_state)
+            tool_response_json = str(feedback_payload)
         tool_response = truncate_feedback_for_prompt(
             tool_response_json,
             self.max_tool_response_length,
@@ -1923,7 +1898,7 @@ class MultiTurnAsyncvLLMEngine:
             current_prompt_template = current_prompt_config["template"]
             
             if current_prompt_template is not None:
-                tool_response = current_prompt_template.format(feedback=tool_response)
+                tool_response = render_prompt_template(current_prompt_template, feedback=tool_response)
 
                 print(f"tool_response: {tool_response}")
 
@@ -1986,6 +1961,11 @@ class MultiTurnAsyncvLLMEngine:
         Returns:
             AgentLoopOutput object with the final result.
         """
+
+        messages = normalize_chat_messages(messages)
+        if self.per_turn_prompts is not None:
+            first_turn_config = self.per_turn_prompts.get("first_turn", {})
+            apply_initial_user_prompt_template(messages, first_turn_config.get("template"))
 
         # Create new agent and environment instances for this request based on configuration
         agent = create_agent(self.agent_type, self.tokenizer)
@@ -2483,8 +2463,7 @@ class MultiTurnAsyncvLLMEngine:
             else:
                 raise ValueError(f"Unsupported environment type: {self.env_type}")
 
-            if not isinstance(messages, list):
-                messages = messages.tolist()
+            messages = normalize_chat_messages(messages)
             tasks.append(
                 asyncio.create_task(
                     self._async_agent_loop(

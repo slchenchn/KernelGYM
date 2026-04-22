@@ -8,6 +8,7 @@ from collections import deque
 from collections.abc import AsyncGenerator
 from contextlib import contextmanager
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
 
@@ -43,6 +44,7 @@ from vllm.v1.executor.abstract import Executor
 
 from kernel.event_logging import (
     append_jsonl_event,
+    build_prompt_feedback_payload,
     build_env_result_record,
     build_generated_code_record,
     build_turn_token_record,
@@ -70,7 +72,17 @@ from kernel.workers.rollout.vllm_rollout.vllm_async_engine import (
     create_agent as shared_create_agent,
     infer_entry_point as shared_infer_entry_point,
 )
-from kernel.workers.rollout.prompt_templates import apply_turn_prompt_template
+from kernel.workers.rollout.vllm_rollout.chat_template_utils import (
+    apply_chat_template_token_ids,
+    normalize_chat_messages,
+)
+from kernel.workers.rollout.prompt_templates import (
+    apply_initial_user_prompt_template,
+    apply_turn_prompt_template,
+    iter_prompt_template_candidates,
+    prompt_template_from_config,
+    render_prompt_template,
+)
 from verl_patch.workers.code.agent_env import (
     BaseEnv,
     FinishReasonTypeEnum,
@@ -257,16 +269,17 @@ class MultiIterAsyncvLLMEngine:
                 "skip_env": prompt_config.skip_env,
                 "response_truncation": prompt_config.get("response_truncation", None),
                 "update_memory": prompt_config.get("update_memory", False),
-                "template": prompt_config.template,
+                "template": prompt_template_from_config(prompt_config, base_dir=Path(prompt_config_path).parent),
             }
 
         return per_turn_prompts
 
     def _stdout_filtered_logging_messages(self, logging_messages: list[str]) -> list[str]:
         prompt_templates = {
-            prompt_config["template"].strip()
+            candidate.strip()
             for prompt_config in (self.per_turn_prompts or {}).values()
-            if prompt_config.get("template")
+            for candidate in iter_prompt_template_candidates(prompt_config.get("template"))
+            if candidate
         }
 
         filtered_messages = []
@@ -838,14 +851,26 @@ class MultiIterAsyncvLLMEngine:
                         messages = req.messages
                 else:
                     raise ValueError(f"Invalid history mode: {history_mode}")
+                messages = normalize_chat_messages(messages)
+                if current_turn > 0:
+                    first_turn_config = self.per_turn_prompts.get("first_turn", {})
+                    apply_initial_user_prompt_template(
+                        messages,
+                        first_turn_config.get("template"),
+                    )
                 apply_turn_prompt_template(
                     messages,
                     prompt_template,
                     current_turn=current_turn,
                     tool_as_user=tool_as_user,
                 )
-        
-        prompt_ids = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+
+        messages = normalize_chat_messages(messages)
+        prompt_ids = apply_chat_template_token_ids(
+            self.tokenizer,
+            messages,
+            add_generation_prompt=True,
+        )
 
         # Prepare parameters
         # Respect both model length limit and configured response length
@@ -1045,11 +1070,12 @@ class MultiIterAsyncvLLMEngine:
         #TODO: weiliu: change the env results and change returns of kernel clients
         # tool_response, env_done, truncate, turn_reward, tool_info = env_result
         env_state = env_result["env_state"]
+        feedback_payload = build_prompt_feedback_payload(env_state)
 
         try:
-            tool_response_json = json.dumps(env_state, ensure_ascii=False, indent=2)
+            tool_response_json = json.dumps(feedback_payload, ensure_ascii=False, indent=2)
         except Exception:
-            tool_response_json = str(env_state)
+            tool_response_json = str(feedback_payload)
         tool_response = truncate_feedback_for_prompt(
             tool_response_json,
             self.max_tool_response_length,
@@ -1070,7 +1096,7 @@ class MultiIterAsyncvLLMEngine:
             current_prompt_template = current_prompt_config["template"]
             
             if current_prompt_template is not None:
-                tool_response = current_prompt_template.format(feedback=tool_response)
+                tool_response = render_prompt_template(current_prompt_template, feedback=tool_response)
 
                 print(f"tool_response: {tool_response}")
 
@@ -1337,6 +1363,11 @@ class MultiIterAsyncvLLMEngine:
     ) -> MultiTurnOutput:
         """Multi-iteration orchestrator wrapping _async_agent_loop logic."""
 
+        messages = normalize_chat_messages(messages)
+        if self.per_turn_prompts is not None:
+            first_turn_config = self.per_turn_prompts.get("first_turn", {})
+            apply_initial_user_prompt_template(messages, first_turn_config.get("template"))
+
         # Create agent and environment
         agent = create_agent(self.agent_type, self.tokenizer)
         env = create_environment(self.env_type, self.max_agent_turns, extra_info)
@@ -1450,6 +1481,11 @@ class MultiIterAsyncvLLMEngine:
         Returns:
             AgentLoopOutput object with the final result.
         """
+
+        messages = normalize_chat_messages(messages)
+        if self.per_turn_prompts is not None:
+            first_turn_config = self.per_turn_prompts.get("first_turn", {})
+            apply_initial_user_prompt_template(messages, first_turn_config.get("template"))
 
         # Check if multi-iteration is enabled
         if self.enable_multi_iteration and self.max_iterations > 1:
@@ -1954,8 +1990,7 @@ class MultiIterAsyncvLLMEngine:
             else:
                 raise ValueError(f"Unsupported environment type: {self.env_type}")
 
-            if not isinstance(messages, list):
-                messages = messages.tolist()
+            messages = normalize_chat_messages(messages)
             tasks.append(
                 asyncio.create_task(
                     self._async_agent_loop(

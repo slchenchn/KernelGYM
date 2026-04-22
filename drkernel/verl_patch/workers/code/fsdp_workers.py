@@ -305,8 +305,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             AutoConfig,
             AutoModel,
             AutoModelForCausalLM,
-            AutoModelForVision2Seq,
         )
+        try:
+            from transformers import AutoModelForImageTextToText as AutoModelForVision2Seq
+        except ImportError:
+            from transformers import AutoModelForVision2Seq
         from verl.utils.model import (
             get_generation_config,
             print_model_size,
@@ -384,7 +387,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 #         actor_module_class = AutoModelForCausalLM
                 #     case _:
                 #         actor_module_class = AutoModel
-                if auto_class == "AutoModelForVision2Seq":
+                if auto_class in ("AutoModelForVision2Seq", "AutoModelForImageTextToText"):
                     actor_module_class = AutoModelForVision2Seq
                 elif auto_class == "AutoModelForCausalLM":
                     actor_module_class = AutoModelForCausalLM

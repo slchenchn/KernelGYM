@@ -51,6 +51,19 @@ def build_worker_wrapper(*, vllm_config: Any, rpc_rank: int = 0, global_rank: in
     return WorkerWrapperBase(rpc_rank=rpc_rank, global_rank=global_rank)
 
 
+def mark_vllm_config_for_external_launcher(vllm_config: Any) -> Any:
+    """Mark worker-side vLLM config as externally launched.
+
+    vLLM 0.19 checks this field during GPU worker initialization. The engine
+    side still uses our custom executor class, but each external Ray actor only
+    sees its own GPU, so the worker-side config must use vLLM's canonical marker.
+    """
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    if parallel_config is not None:
+        parallel_config.distributed_executor_backend = "external_launcher"
+    return vllm_config
+
+
 def build_openai_chat_serving(
     engine_client: Any,
     *,

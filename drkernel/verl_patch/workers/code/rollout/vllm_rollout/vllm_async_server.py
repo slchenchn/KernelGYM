@@ -30,6 +30,7 @@ from verl_patch.workers.code.rollout.vllm_rollout.vllm_async_engine import (
     ExternalZeroMQDistributedExecutor,
     _get_model_runner_workers,
 )
+from verl_patch.workers.code.rollout.vllm_rollout.engine_kwargs import get_vllm_engine_kwargs
 
 logger = logging.getLogger(__file__)
 
@@ -115,11 +116,7 @@ class AsyncvLLMServer(AsyncServerBase):
             else:
                 logger.warning(f"cudagraph_capture_sizes must be a list, but got {cudagraph_capture_sizes}")
 
-        engine_kwargs = config.get("engine_kwargs", {}).get("vllm", {}) or {}
-
-        engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
-        if config.get("limit_images", None):  # support for multi-image data
-            engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
+        engine_kwargs = get_vllm_engine_kwargs(config)
 
         engine_args = AsyncEngineArgs(
             model=local_path,

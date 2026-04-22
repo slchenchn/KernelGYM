@@ -50,7 +50,12 @@ from verl_patch.workers.code.rollout.vllm_rollout.vllm_config_helper import (
     get_vllm_config_kwargs,
     verify_importance_sampling_safety,
 )
-from verl_patch.workers.code.rollout.vllm_rollout.vllm_compat import WorkerWrapperBase, build_worker_wrapper
+from verl_patch.workers.code.rollout.vllm_rollout.vllm_compat import (
+    WorkerWrapperBase,
+    build_worker_wrapper,
+    mark_vllm_config_for_external_launcher,
+)
+from verl_patch.workers.code.rollout.vllm_rollout.engine_kwargs import get_vllm_engine_kwargs
 
 
 def _sync_diag_enabled() -> bool:
@@ -149,6 +154,10 @@ class vLLMRollout(BaseRollout):
 
         # Get additional kwargs for correct logprobs handling
         vllm_kwargs = get_vllm_config_kwargs(config)
+
+        # Apply explicitly configured vLLM engine args such as
+        # language_model_only, which corresponds to CLI --language-model-only.
+        vllm_kwargs.update(get_vllm_engine_kwargs(config))
 
         # Apply online quantization engine kwargs if configured
         from kernel.workers.rollout.vllm_rollout.online_quant_utils import (
@@ -490,7 +499,7 @@ class vLLMAsyncRollout:
         all_kwargs[0]["rank"] = int(os.environ["RANK"])
         all_kwargs[0]["local_rank"] = 0
 
-        self.vllm_config = all_kwargs[0]["vllm_config"]
+        self.vllm_config = mark_vllm_config_for_external_launcher(all_kwargs[0]["vllm_config"])
         self.inference_engine = build_worker_wrapper(
             vllm_config=self.vllm_config,
             rpc_rank=0,

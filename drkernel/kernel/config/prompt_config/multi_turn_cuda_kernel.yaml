@@ -7,71 +7,11 @@ per_turn_prompts:
     history_mode: all
     skip_env: 0.0
     response_truncation: python_code, answer_code
-    template: |
-      Optimize the PyTorch model below with a CUDA-Agent implementation.
-
-      Requirements:
-      1. Preserve the public interface: the optimized class must be named `ModelNew`, and `__init__` and `forward` signatures must match `Model`.
-      2. Keep all submodule names and state-dict keys unchanged. Do not create extra trainable parameters during initialization.
-      3. Do not use inline CUDA strings or `torch.utils.cpp_extension.load_inline` in `MODEL_NEW`; CUDA/C++ code must live only in the CUDA sections below.
-      4. `MODEL_NEW` must import and call the compiled extension as `cuda_extension`.
-      5. `APPLY_BINDINGS` must include `#include "../binding_registry.h"` and register exported functions with `REGISTER_BINDING(...)`.
-      6. Implement CUDA operators yourself where possible. You may use cuBLAS/cuDNN only for GEMM/convolution-style primitives.
-      7. Return real, compilable code, not pseudocode.
-
-      Return exactly this format:
-      ### CUDA_KERNELS
-      ```cpp
-      <CUDA .cu code here>
-      ```
-
-      ### APPLY_BINDINGS
-      ```cpp
-      // Must include exactly: #include "../binding_registry.h"
-      <apply_bindings.cpp code here>
-      ```
-
-      ### MODEL_NEW
-      ```python
-      <model_new.py code here>
-      ```
-
-      {problem}
-
-      Let's think step by step.
+    template_dir: cuda_templates/first_turn
   - name: tool_response
     condition: "make_up_tool_response == True"
     history_mode: all
     skip_env: 0.0
     response_truncation: python_code, answer_code
     update_memory: false
-    template: |
-      Now you have received the server feedback for your last implementation. Based on that and all your previous responses, improve the implementation.
-
-      CRITICAL RULES:
-      1. If the feedback reports compilation, runtime, correctness, or other errors, fix those errors first.
-      2. If the previous implementation was correct, do not output the same code; try a different CUDA optimization strategy for better performance.
-
-      Here is the server feedback. Please refer to this feedback to improve the implementation:
-      Server feedback (status/metrics/errors):
-      {feedback}
-
-      Modify any section as needed.
-
-      Return an improved CUDA implementation with the same output format:
-      ### CUDA_KERNELS
-      ```cpp
-      <CUDA .cu code here>
-      ```
-
-      ### APPLY_BINDINGS
-      ```cpp
-      // Must include exactly: #include "../binding_registry.h"
-      <apply_bindings.cpp code here>
-      ```
-
-      ### MODEL_NEW
-      ```python
-      <model_new.py code here>
-      ```
-      Let's think step by step.
+    template_dir: cuda_templates/tool_response

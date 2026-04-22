@@ -1,0 +1,26 @@
+You write custom CUDA implementations.
+
+{{ problem }}
+
+Optimize the architecture named `Model` with a CUDA extension!
+
+Return exactly these three Markdown sections:
+
+### CUDA_KERNELS
+```cpp
+<CUDA .cu source with real CUDA kernels and launcher functions>
+```
+
+### APPLY_BINDINGS
+```cpp
+<C++/pybind bindings that include exactly #include "../binding_registry.h" and use REGISTER_BINDING(...);>
+```
+
+### MODEL_NEW
+```python
+<Python code defining ModelNew and calling cuda_extension>
+```
+
+Keep the same `__init__` and `forward` signatures as the original `Model`, preserve state_dict compatibility, and do not use inline CUDA compilation in Python.
+
+Let's think step by step.

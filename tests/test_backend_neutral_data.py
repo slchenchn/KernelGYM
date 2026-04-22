@@ -271,9 +271,9 @@ def test_write_backend_neutral_text_uses_row_separators(tmp_path):
 def test_format_prompt_messages_for_first_turn_outputs_complete_formatted_prompt():
     messages = [{"role": "user", "content": "\nPROMPT\n"}]
 
-    formatted = format_prompt_messages_for_first_turn(messages, "INSTRUCTION\n\n{problem}\n\nLet's think.\n")
+    formatted = format_prompt_messages_for_first_turn(messages, "INSTRUCTION\n\n{{ problem }}\n\nLet's think.\n")
 
-    assert formatted == [{"role": "user", "content": "INSTRUCTION\n\nPROMPT\n\nLet's think."}]
+    assert formatted == [{"role": "user", "content": "INSTRUCTION\n\nPROMPT\n\nLet's think.\n"}]
     assert messages == [{"role": "user", "content": "\nPROMPT\n"}]
 
 
@@ -321,7 +321,7 @@ def test_write_formatted_prompt_sample_text_outputs_full_formatted_prompts(tmp_p
         "    template: |\n"
         "      INSTRUCTION\n"
         "\n"
-        "      {problem}\n"
+        "      {{ problem }}\n"
         "\n"
         "      Let's think.\n",
         encoding="utf-8",
@@ -352,6 +352,59 @@ def test_write_formatted_prompt_sample_text_outputs_full_formatted_prompts(tmp_p
         "PROMPT 1\n"
         "\n"
         "Let's think.\n"
+    )
+
+
+def test_write_formatted_prompt_sample_text_can_load_template_dir(tmp_path):
+    neutral_parquet_path = tmp_path / "neutral.parquet"
+    sample_output_path = tmp_path / "formatted_sample.txt"
+    prompt_config_path = tmp_path / "prompt.yaml"
+    template_dir = tmp_path / "templates" / "first_turn"
+    template_dir.mkdir(parents=True)
+    (template_dir / "a.jinja").write_text("A\n\n{{ problem }}\n", encoding="utf-8")
+    (template_dir / "b.jinja").write_text("B\n\n{{ problem }}\n", encoding="utf-8")
+    prompt_type = pa.list_(
+        pa.struct(
+            [
+                pa.field("content", pa.string()),
+                pa.field("role", pa.string()),
+            ]
+        )
+    )
+    neutral_prompts = [
+        [{"role": "user", "content": "PROMPT 0"}],
+        [{"role": "user", "content": "PROMPT 1"}],
+    ]
+    table = pa.table({"prompt": pa.array(neutral_prompts, type=prompt_type), "ability": ["kernel", "kernel"]})
+    pq.write_table(table, neutral_parquet_path)
+    prompt_config_path.write_text(
+        "per_turn_prompts:\n"
+        "  - name: first_turn\n"
+        "    template_dir: templates/first_turn\n",
+        encoding="utf-8",
+    )
+
+    sample_indices = write_formatted_prompt_sample_text(
+        neutral_parquet_path,
+        sample_output_path,
+        prompt_config_path,
+        sample_size=2,
+        seed=0,
+    )
+
+    assert sample_indices == [0, 1]
+    assert sample_output_path.read_text() == (
+        "==================== sample 0 source_row 0 ====================\n"
+        "--- message 0 role=user ---\n"
+        "B\n"
+        "\n"
+        "PROMPT 0\n"
+        "\n"
+        "==================== sample 1 source_row 1 ====================\n"
+        "--- message 0 role=user ---\n"
+        "B\n"
+        "\n"
+        "PROMPT 1\n"
     )
 
 

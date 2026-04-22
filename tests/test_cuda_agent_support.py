@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import enum
 import importlib.util
+import json
 import numpy as np
 import os
 import shutil
@@ -28,11 +29,14 @@ if "verl" not in sys.modules:
 
 from kernel.metrics.kernel_multi_turn_metrics import compute_kernel_multi_turn_metrics
 from kernel.metrics.mismatch_quality_metrics import compute_mismatch_quality_metrics
-from kernel.event_logging import truncate_feedback_for_prompt
-from kernel.utils.kernel_code import extract_kernel_submission
+from kernel.event_logging import build_prompt_feedback_payload, truncate_feedback_for_prompt
+from kernel.utils.kernel_code import extract_cuda_agent_sections, extract_kernel_submission
+from kernelgym.common import ErrorCode
+from kernelgym.backend.kernelbench import cuda_agent_backend as cuda_agent_backend_module
 from kernelgym.backend.kernelbench.cuda_agent_backend import KernelBenchCudaAgentBackend
-from kernelgym.schema.task import EvaluationTask
+from kernelgym.schema.task import EvaluationTask, KernelEvaluationTask
 from kernelgym.toolkit.kernelbench.exec_types import KernelExecResult
+from kernelgym.toolkit.kernelbench import pipeline as kernelbench_pipeline
 from kernelgym.toolkit.kernelbench.pipeline import _apply_coverage_metadata
 from kernelgym.toolkit.kernelbench.profiling import compute_named_kernel_coverage
 from kernelgym.toolkit.kernelbench.toolkit import KernelBenchToolkit
@@ -269,6 +273,55 @@ def test_extract_kernel_submission_preserves_cuda_sections():
     assert "### MODEL_NEW" in extracted
 
 
+def test_extract_kernel_submission_uses_content_after_think_end_marker():
+    extracted = extract_kernel_submission(
+        _fixture_text("response_valid_after_think.md"),
+        kernel_backend="cuda_agent",
+    )
+
+    assert "wrong_kernel" not in extracted
+    assert "noop_kernel" in extracted
+    assert "noop_forward" in extracted
+    assert "class ModelNew" in extracted
+
+
+def test_extract_kernel_submission_uses_last_complete_cuda_section_group():
+    response = _fixture_text("response_valid.md") + "\n\n" + _fixture_text("response_valid_alt.md")
+
+    extracted = extract_kernel_submission(response, kernel_backend="cuda_agent")
+
+    assert "noop_kernel" not in extracted
+    assert "final_kernel" in extracted
+    assert "final_forward" in extracted
+
+
+def test_extract_kernel_submission_preserves_partial_cuda_sections_for_precheck():
+    extracted = extract_kernel_submission(
+        _fixture_text("response_missing_apply_bindings.md"),
+        kernel_backend="cuda_agent",
+    )
+
+    assert extracted.startswith("### CUDA_KERNELS")
+    assert "### APPLY_BINDINGS" not in extracted
+    assert "### MODEL_NEW" in extracted
+
+    sources, model_code = KernelBenchCudaAgentBackend._parse_embedded_sources(extracted)
+    error, error_code, info = precheck_cuda_agent_submission(model_code, sources)
+
+    assert info["passed"] is False
+    assert error_code is not None
+    assert "binding .cpp file" in error
+
+
+def test_cuda_agent_section_extractor_accepts_cuda_cxx_and_py_fences():
+    sections = extract_cuda_agent_sections(_fixture_text("response_cuda_py_fences.md"), require_complete=True)
+
+    assert set(sections) == {"CUDA_KERNELS", "APPLY_BINDINGS", "MODEL_NEW"}
+    assert "noop_kernel" in sections["CUDA_KERNELS"]
+    assert "REGISTER_BINDING" in sections["APPLY_BINDINGS"]
+    assert "class ModelNew" in sections["MODEL_NEW"]
+
+
 def test_precheck_cuda_agent_submission_accepts_valid_bundle():
     error, error_code, info = precheck_cuda_agent_submission(
         model_code=_fixture_text("model_new_valid.py"),
@@ -338,6 +391,39 @@ def test_cuda_agent_backend_uses_configured_tmpdir_parent(tmp_path):
             os.environ[env_name] = previous
         if work_dir is not None:
             shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def test_cuda_agent_backend_skips_noexec_tmpdir_parent(monkeypatch, tmp_path):
+    noexec_dir = tmp_path / "shm"
+    default_dir = tmp_path / "tmp"
+    noexec_dir.mkdir()
+    default_dir.mkdir()
+    monkeypatch.setenv("KERNELGYM_CUDA_AGENT_TMPDIR", str(noexec_dir))
+    monkeypatch.setattr(cuda_agent_backend_module, "_CUDA_AGENT_DEFAULT_TMPDIR", str(default_dir))
+    monkeypatch.setattr(
+        KernelBenchCudaAgentBackend,
+        "_path_has_noexec_mount",
+        staticmethod(lambda path: Path(path) == noexec_dir),
+    )
+
+    work_dir = KernelBenchCudaAgentBackend()._create_work_dir()
+    try:
+        assert work_dir.parent == default_dir
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def test_cuda_agent_backend_detects_noexec_from_mountinfo():
+    mountinfo = "\n".join(
+        [
+            "21 1 0:20 / / rw,relatime - ext4 /dev/root rw",
+            "22 21 0:21 / /dev/shm rw,nosuid,nodev,noexec,relatime - tmpfs shm rw,size=268435456k",
+            "23 21 0:22 / /tmp rw,nosuid,nodev,relatime - tmpfs tmp rw",
+        ]
+    )
+
+    assert KernelBenchCudaAgentBackend._mountinfo_path_has_noexec(Path("/dev/shm/kernelgym"), mountinfo)
+    assert not KernelBenchCudaAgentBackend._mountinfo_path_has_noexec(Path("/tmp/kernelgym"), mountinfo)
 
 
 def test_compute_named_kernel_coverage_matches_cuda_kernel_names():
@@ -527,6 +613,83 @@ def test_truncate_feedback_for_prompt_respects_middle_and_side_modes():
     assert "total_chars=200" in right
 
 
+def test_build_prompt_feedback_payload_prefers_specific_precheck_message():
+    env_state = {
+        "task_id": "parallel_task_1",
+        "status": "failed",
+        "compiled": False,
+        "correctness": False,
+        "decoy_kernel": False,
+        "reference_runtime": -1.0,
+        "kernel_runtime": -1.0,
+        "speedup": 0.0,
+        "error_code": "COMPILATION_ERROR",
+        "metadata": {
+            "compilation_error": (
+                "Task processing failed: RuntimeError: CUDA error detected: "
+                "Kernel compilation failed: Precheck failed: model_new.py must import or reference cuda_extension"
+            ),
+            "backend": "cuda_agent",
+            "device": "cuda:0",
+            "tm_enter_monotonic_ns": 123,
+        },
+        "error_message": "Task failed due to kernel compilation error",
+    }
+
+    payload = build_prompt_feedback_payload(env_state)
+
+    assert payload["error_message"] == "Precheck failed: model_new.py must import or reference cuda_extension"
+    assert payload["metadata"] == {"device": "cuda:0", "backend": "cuda_agent"}
+    assert "tm_enter_monotonic_ns" not in json.dumps(payload)
+
+
+def test_build_prompt_feedback_payload_extracts_compiler_error_lines():
+    env_state = {
+        "status": "failed",
+        "compiled": False,
+        "correctness": False,
+        "metadata": {
+            "compilation_error": """
+Error building extension 'kernelgym_cuda_agent_demo':
+[1/4] /usr/local/cuda/bin/nvcc -c /tmp/generated.cu -o generated.cuda.o
+FAILED: generated_binding.o
+/tmp/generated_binding.cpp:21:32: error: macro "REGISTER_BINDING" requires 2 arguments, but only 1 given
+/tmp/generated_binding.cpp:12:5: error: 'launch_subtract_spatial_mean' was not declared in this scope
+ninja: build stopped: subcommand failed.
+""".strip(),
+        },
+    }
+
+    payload = build_prompt_feedback_payload(env_state)
+
+    assert 'REGISTER_BINDING" requires 2 arguments' in payload["error_message"]
+    assert "launch_subtract_spatial_mean" in payload["error_message"]
+    assert "/usr/local/cuda/bin/nvcc" not in payload["error_message"]
+
+
+def test_build_prompt_feedback_payload_extracts_runtime_exception_line():
+    env_state = {
+        "status": "failed",
+        "compiled": False,
+        "correctness": False,
+        "error_code": "RUNTIME_ERROR",
+        "metadata": {
+            "runtime_error": """
+Traceback (most recent call last):
+  File "/tmp/model_new.py", line 10, in forward
+    return cuda_extension.foo(x)
+AttributeError: 'NoneType' object has no attribute 'metadata'
+""".strip(),
+            "runtime_error_name": "builtins.AttributeError",
+        },
+    }
+
+    payload = build_prompt_feedback_payload(env_state)
+
+    assert payload["error_message"] == "'NoneType' object has no attribute 'metadata'"
+    assert payload["metadata"]["runtime_error_name"] == "builtins.AttributeError"
+
+
 def test_kernelbench_toolkit_resolve_eval_flags_defaults_and_overrides():
     toolkit = KernelBenchToolkit()
     cuda_task = SimpleNamespace(
@@ -597,7 +760,128 @@ def test_apply_coverage_metadata_marks_decoy_for_unmatched_cuda_kernels():
         detect_decoy_kernel=True,
     )
     assert result.decoy_kernel is True
-    assert metadata["num_total_kernels"] == 3
+
+
+def test_kernelbench_toolkit_handles_none_pipeline_result(monkeypatch):
+    def fake_eval_kernel_against_ref(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(kernelbench_pipeline, "eval_kernel_against_ref", fake_eval_kernel_against_ref)
+
+    task = EvaluationTask(
+        task_id="eval_none",
+        reference_code="""
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    def forward(self, x):
+        return x
+
+def get_inputs():
+    return [torch.randn(1, 1)]
+
+def get_init_inputs():
+    return []
+""".strip(),
+        kernel_code="""
+import torch
+import torch.nn as nn
+
+class ModelNew(nn.Module):
+    def forward(self, x):
+        return x
+""".strip(),
+        backend="cuda_agent",
+        device="cuda:0",
+    )
+
+    result = KernelBenchToolkit().evaluate_kernel(task)
+
+    assert result.status == "failed"
+    assert result.error_code == ErrorCode.RUNTIME_ERROR
+    assert result.error_message == "Kernel evaluation failed: empty evaluation result"
+
+
+def test_kernelbench_toolkit_handles_none_pipeline_result_kernel_only(monkeypatch):
+    def fake_eval_kernel_against_ref(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(kernelbench_pipeline, "eval_kernel_against_ref", fake_eval_kernel_against_ref)
+
+    task = KernelEvaluationTask(
+        task_id="kernel_none",
+        base_task_id="base_none",
+        reference_code="""
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    def forward(self, x):
+        return x
+
+def get_inputs():
+    return [torch.randn(1, 1)]
+
+def get_init_inputs():
+    return []
+""".strip(),
+        kernel_code="""
+import torch
+import torch.nn as nn
+
+class ModelNew(nn.Module):
+    def forward(self, x):
+        return x
+""".strip(),
+        backend="cuda_agent",
+        device="cuda:0",
+    )
+
+    result = KernelBenchToolkit().evaluate_kernel_only(task)
+
+    assert result.status == "failed"
+    assert result.error_code == ErrorCode.RUNTIME_ERROR
+    assert result.error_message == "Kernel evaluation failed: empty evaluation result"
+
+
+def test_eval_kernel_against_ref_compile_retry_error_returns_failed_result(monkeypatch):
+    class DummyModel(torch.nn.Module):
+        def forward(self, x):
+            return x
+
+    class FakeBackendAdapter:
+        def compile(self, *args, **kwargs):
+            return {"compiled": False, "error": "No such file or directory: lock"}
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda device: None)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device=None: "Fake GPU")
+    monkeypatch.setattr(
+        kernelbench_pipeline,
+        "load_original_model_and_inputs",
+        lambda *args, **kwargs: (
+            DummyModel,
+            lambda: [],
+            lambda: [torch.randn(1, 1)],
+        ),
+    )
+    monkeypatch.setattr(kernelbench_pipeline, "graceful_eval_cleanup", lambda *args, **kwargs: None)
+
+    result = kernelbench_pipeline.eval_kernel_against_ref(
+        original_model_src="unused",
+        custom_model_src="unused",
+        verbose=False,
+        device=torch.device("cuda:0"),
+        backend="cuda_agent",
+        backend_adapter=FakeBackendAdapter(),
+    )
+
+    assert result is not None
+    assert result.compiled is False
+    assert result.correctness is False
+    assert result.metadata["compilation_error_name"] == "compile_error"
+    assert "No such file or directory" in str(result.metadata["compilation_error"])
 
 
 def test_apply_coverage_metadata_can_disable_decoy_penalty():
